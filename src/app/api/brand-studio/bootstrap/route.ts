@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { checkMasterPassword } from "@/lib/auth";
 import { getSettings, readStore, updateStore } from "@/lib/db";
 import {
-  getHostProfile,
   normalizeHostKey,
   resolveHostProfile,
   upsertKeywordHostProfile,
@@ -190,7 +189,7 @@ export async function POST(request: Request) {
       designId: string;
     } = { mainLandingEnabled: false, keyword: "", designId: "" };
     if (multiHost && hostKey) {
-      const profile = getHostProfile(storeAfter, hostKey);
+      const profile = resolveHostProfile(storeAfter, hostKey);
       const ml = profile?.mainLanding;
       verify = {
         mainLandingEnabled: mainLandingEnabled({ mainLanding: ml }),

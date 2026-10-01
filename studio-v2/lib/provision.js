@@ -927,61 +927,85 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
     return false;
   }
 
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  const hostCandidates = Array.isArray(opts.hostCandidates) ? opts.hostCandidates : [];
+  const verifyOpts = {
+    host: expectHost,
+    hostCandidates,
+    masterPassword: secret,
+    bypassSecret,
+    expectDesignId,
+    onLog,
+  };
+  const bootstrapJson = {
+    ...body,
+    ...(Array.isArray(body.vendorGroups) && body.vendorGroups.length ? { vendorGroups: body.vendorGroups } : {}),
+  };
+
+  let lastBootstrap = null;
+  let saveOk = false;
+
+  for (let saveAttempt = 0; saveAttempt < 3 && !saveOk; saveAttempt += 1) {
+    if (saveAttempt > 0) {
+      onLog(`메인 저장 재시도 (${saveAttempt + 1}/3)…`);
+      await sleep(3000);
+    }
     for (const base of bases) {
       try {
         const res = await fetch(`${base}/api/brand-studio/bootstrap`, {
           method: "POST",
           headers: mergeHeaders({ "Content-Type": "application/json" }, auth),
-          body: JSON.stringify({
-            ...body,
-            ...(Array.isArray(body.vendorGroups) && body.vendorGroups.length
-              ? { vendorGroups: body.vendorGroups }
-              : {}),
-          }),
+          body: JSON.stringify(bootstrapJson),
           signal: AbortSignal.timeout(120000),
         });
         const data = await readJsonSafe(res);
-        if (res.ok) {
-          const hostCandidates = Array.isArray(opts.hostCandidates) ? opts.hostCandidates : [];
-          if (data?.ok === false || data?.error) {
-            onLog(`bootstrap 저장 실패: ${data.error || "host profile 미저장"} (${base})`);
-          } else if (data.enriched) {
-            onLog(`메인 디자인 ON + 제미나이 내용 보충 완료: ${base}`);
-          } else if (data.enrichError) {
-            onLog(`메인 디자인 ON 적용. 내용 보충 보류: ${data.enrichError}`);
-          } else {
-            onLog(`메인 디자인 ON · 블로그 설정을 적용했습니다: ${base}`);
-          }
-
-          if (bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates)) {
-            onLog(`메인 디자인 저장 확인 완료 (bootstrap): ${base}`);
-            return true;
-          }
-
-          const verified = await verifyMainLanding(bases, expectKeyword, {
-            host: expectHost,
-            hostCandidates,
-            masterPassword: secret,
-            bypassSecret,
-            expectDesignId,
-            onLog,
-          });
-          if (verified.ok) {
-            onLog(`메인 디자인 저장 확인 완료 (host-profile): ${verified.via || base}`);
-            return true;
-          }
-          onLog(
-            `bootstrap 응답 확인 보류 — ${verified.reason || "host-profile 미배포"} (${attempt + 1}/10): ${base}`
-          );
-        } else {
+        lastBootstrap = { data, base, resOk: res.ok };
+        if (!res.ok) {
           onLog(`설정 적용 대기 (${res.status}): ${formatBootstrapError(res.status, data, base)}`);
+          continue;
         }
+        if (data?.ok === false || data?.error) {
+          onLog(`bootstrap 저장 실패: ${data.error || "host profile 미저장"} (${base})`);
+          continue;
+        }
+        if (data.enriched) onLog(`메인 디자인 ON + 제미나이 내용 보충 완료: ${base}`);
+        else if (data.enrichError) onLog(`메인 디자인 ON 적용. 내용 보충 보류: ${data.enrichError}`);
+        else onLog(`메인 디자인 ON · 블로그 설정을 적용했습니다: ${base}`);
+        saveOk = true;
+        break;
       } catch (err) {
         onLog(`설정 적용 재시도: ${err.message || base}`);
       }
     }
-    await sleep(5000);
+  }
+
+  if (!saveOk && !lastBootstrap?.resOk) {
+    onLog(
+      "배포는 됐지만 메인 디자인(ON) 자동 적용에 실패했습니다. Vercel 배포 보호 우회 시크릿·MASTER_PASSWORD 를 확인하거나 관리자에서 메인 랜딩을 켜 주세요."
+    );
+    return false;
+  }
+
+  await sleep(2000);
+
+  for (let verifyAttempt = 0; verifyAttempt < 8; verifyAttempt += 1) {
+    if (verifyAttempt > 0) {
+      await sleep(2500);
+    }
+    const data = lastBootstrap?.data;
+    const base = lastBootstrap?.base || bases[0];
+    if (
+      data &&
+      bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates)
+    ) {
+      onLog(`메인 디자인 저장 확인 완료 (bootstrap): ${base}`);
+      return true;
+    }
+    const verified = await verifyMainLanding(bases, expectKeyword, verifyOpts);
+    if (verified.ok) {
+      onLog(`메인 디자인 저장 확인 완료 (host-profile): ${verified.via || base}`);
+      return true;
+    }
+    onLog(`메인 확인 대기 (${verifyAttempt + 1}/8): ${verified.reason || "host-profile"}`);
   }
   onLog(
     "배포는 됐지만 메인 디자인(ON) 자동 적용에 실패했습니다. Vercel 배포 보호 우회 시크릿·MASTER_PASSWORD 를 확인하거나 관리자에서 메인 랜딩을 켜 주세요."

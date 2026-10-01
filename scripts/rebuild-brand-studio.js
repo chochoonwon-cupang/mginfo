@@ -43,8 +43,19 @@ try {
   }
   fs.mkdirSync(destDir, { recursive: true });
   const dest = path.join(destDir, "InfocsBrandStudio.exe");
-  fs.copyFileSync(exe, dest);
-  console.log("OK ->", dest);
+  const destAlt = path.join(destDir, "InfocsBrandStudio-new.exe");
+  try {
+    fs.copyFileSync(exe, dest);
+    console.log("OK ->", dest);
+  } catch (err) {
+    if (err && err.code === "EBUSY") {
+      fs.copyFileSync(exe, destAlt);
+      console.log("OK (기존 exe 사용 중) ->", destAlt);
+      console.log("Studio 종료 후 InfocsBrandStudio-new.exe 를 InfocsBrandStudio.exe 로 바꿔 쓰세요.");
+    } else {
+      throw err;
+    }
+  }
 } finally {
   pkg.build.directories.output = prevOutput;
   fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf8");
