@@ -878,8 +878,14 @@ function normalizeHostForCompare(raw) {
     .replace(/\/.*$/, "");
 }
 
+/** bootstrap POST 1회 + Blob 반영 대기 후 host-profile 확인 (재POST 시 enrich 비용 방지) */
+const BOOTSTRAP_POST_VERIFY_WAIT_MS = 5200;
+const BOOTSTRAP_HOST_VERIFY_INTERVAL_MS = 3200;
+const BOOTSTRAP_HOST_VERIFY_MAX = 6;
+
 function bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates = []) {
-  if (data?.error) return false;
+  if (data?.error && data?.ok === false) return false;
+  if (data?.verifyPending) return false;
   if (data?.ok === false) return false;
   const verify = data.verify;
   if (verify && typeof verify === "object" && verify.mainLandingEnabled) {
@@ -944,17 +950,19 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
   let lastBootstrap = null;
   let saveOk = false;
 
-  for (let saveAttempt = 0; saveAttempt < 3 && !saveOk; saveAttempt += 1) {
+  /** enrich(제미나이)는 1회만. HTTP 실패·525 등일 때만 2번째 POST(enrich OFF). */
+  for (let saveAttempt = 0; saveAttempt < 2 && !saveOk; saveAttempt += 1) {
     if (saveAttempt > 0) {
-      onLog(`메인 저장 재시도 (${saveAttempt + 1}/3)…`);
-      await sleep(3000);
+      onLog(`메인 API 재호출 (2/2) — 연결·배포 대기 (내용 보충 생략)…`);
+      await sleep(5000);
     }
+    const enrichThisPass = saveAttempt === 0 && bootstrapJson.enrich !== false;
     for (const base of bases) {
       try {
         const res = await fetch(`${base}/api/brand-studio/bootstrap`, {
           method: "POST",
           headers: mergeHeaders({ "Content-Type": "application/json" }, auth),
-          body: JSON.stringify(bootstrapJson),
+          body: JSON.stringify({ ...bootstrapJson, enrich: enrichThisPass }),
           signal: AbortSignal.timeout(120000),
         });
         const data = await readJsonSafe(res);
@@ -963,14 +971,18 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
           onLog(`설정 적용 대기 (${res.status}): ${formatBootstrapError(res.status, data, base)}`);
           continue;
         }
+        saveOk = true;
         if (data?.ok === false || data?.error) {
-          onLog(`bootstrap 저장 실패: ${data.error || "host profile 미저장"} (${base})`);
-          continue;
-        }
-        if (data.enriched) onLog(`메인 디자인 ON + 제미나이 내용 보충 완료: ${base}`);
+          if (data?.verify?.mainLandingEnabled) {
+            onLog(`메인 디자인 ON 적용 (저장 확인): ${base}`);
+          } else if (data?.verifyPending) {
+            onLog(`메인 저장 완료 — Blob 반영 확인 대기 중 (${base})`);
+          } else {
+            onLog(`메인 저장 요청 접수 — Blob 반영 확인 대기 (${base})`);
+          }
+        } else if (data.enriched) onLog(`메인 디자인 ON + 제미나이 내용 보충 완료: ${base}`);
         else if (data.enrichError) onLog(`메인 디자인 ON 적용. 내용 보충 보류: ${data.enrichError}`);
         else onLog(`메인 디자인 ON · 블로그 설정을 적용했습니다: ${base}`);
-        saveOk = true;
         break;
       } catch (err) {
         onLog(`설정 적용 재시도: ${err.message || base}`);
@@ -985,11 +997,11 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
     return false;
   }
 
-  await sleep(2000);
+  await sleep(BOOTSTRAP_POST_VERIFY_WAIT_MS);
 
-  for (let verifyAttempt = 0; verifyAttempt < 8; verifyAttempt += 1) {
+  for (let verifyAttempt = 0; verifyAttempt < BOOTSTRAP_HOST_VERIFY_MAX; verifyAttempt += 1) {
     if (verifyAttempt > 0) {
-      await sleep(2500);
+      await sleep(BOOTSTRAP_HOST_VERIFY_INTERVAL_MS);
     }
     const data = lastBootstrap?.data;
     const base = lastBootstrap?.base || bases[0];
@@ -1005,7 +1017,9 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
       onLog(`메인 디자인 저장 확인 완료 (host-profile): ${verified.via || base}`);
       return true;
     }
-    onLog(`메인 확인 대기 (${verifyAttempt + 1}/8): ${verified.reason || "host-profile"}`);
+    onLog(
+      `메인 확인 대기 (${verifyAttempt + 1}/${BOOTSTRAP_HOST_VERIFY_MAX}): ${verified.reason || "host-profile"}`
+    );
   }
   onLog(
     "배포는 됐지만 메인 디자인(ON) 자동 적용에 실패했습니다. Vercel 배포 보호 우회 시크릿·MASTER_PASSWORD 를 확인하거나 관리자에서 메인 랜딩을 켜 주세요."

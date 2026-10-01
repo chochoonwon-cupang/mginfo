@@ -22,6 +22,22 @@ function telHref(phone: string) {
   return `tel:${phone.replace(/[^\d+]/g, "")}`;
 }
 
+/** 로고 2줄: 키워드가 subtitle에 또 나오면 업체명·지역으로 정리 */
+function demoHeaderSubtitle(copy: MainLandingCopy, vendor: MainLandingVendor): string {
+  const title = copy.heroTitle.trim();
+  const sub = copy.heroSubtitle.trim();
+  const dup =
+    !sub ||
+    sub === title ||
+    sub.startsWith(`${title} ·`) ||
+    sub.startsWith(`${title} `);
+  if (!dup) return sub;
+  const parts = [vendor.name || copy.brand, vendor.region]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+  return parts.length ? parts.join(" · ") : sub || title;
+}
+
 function demoThemeStyle(copy: MainLandingCopy): CSSProperties {
   const t = copy.theme;
   return {
@@ -246,7 +262,7 @@ export function DemolitionLandingPage({
         <div className="demo-top-inner">
           <a className="demo-logo" href="#top">
             <strong>{copy.heroTitle}</strong>
-            <span>{copy.heroSubtitle}</span>
+            <span>{demoHeaderSubtitle(copy, vendor)}</span>
           </a>
           <nav className="demo-nav" aria-label="메인">
             <a href="#about">소개</a>
@@ -276,7 +292,8 @@ export function DemolitionLandingPage({
           <p className="demo-badge">{copy.heroKicker}</p>
           <p className="demo-hero-label">{vendor.keyword || copy.heroTitle} 폐업철거 전문</p>
           <h1>
-            {copy.heroTitle} <span className="demo-hero-sub">전문 · {copy.heroTitle}</span>
+            {copy.heroTitle}
+            <span className="demo-hero-sub">{copy.heroKicker}</span>
           </h1>
           <p className="demo-hero-lead">{copy.heroLead}</p>
           <div className="demo-hero-actions">

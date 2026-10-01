@@ -72,6 +72,7 @@ export async function POST(request: Request) {
     }
   }
 
+  let hostProfileUpserted = false;
   try {
     await updateStore((s) => {
       if (geminiFromStudio) s.settings.geminiApiKey = geminiFromStudio;
@@ -106,7 +107,7 @@ export async function POST(request: Request) {
               : body.company,
         };
         if (siteTagline) bootstrapBody.siteTagline = siteTagline;
-        upsertKeywordHostProfile(s, hostKey, bootstrapBody);
+        hostProfileUpserted = Boolean(upsertKeywordHostProfile(s, hostKey, bootstrapBody));
         return;
       }
 
@@ -164,11 +165,13 @@ export async function POST(request: Request) {
               enrichedAt,
             });
             if (multiHost && hostKey) {
-              upsertKeywordHostProfile(s, hostKey, {
-                ...(body as Record<string, unknown>),
-                siteTagline: siteTagline || incomingTagline,
-                mainLanding: nextLanding,
-              });
+              hostProfileUpserted = Boolean(
+                upsertKeywordHostProfile(s, hostKey, {
+                  ...(body as Record<string, unknown>),
+                  siteTagline: siteTagline || incomingTagline,
+                  mainLanding: nextLanding,
+                })
+              );
             } else {
               s.settings.mainLanding = nextLanding;
             }
@@ -182,20 +185,50 @@ export async function POST(request: Request) {
 
     revalidatePublicSite();
 
-    const storeAfter = await readStore();
+    /** Blob read-after-write 지연 — 한 요청 안에서 기다려 Studio 재POST(제미나이 재호출) 방지 */
+    if (multiHost && hostKey && hostProfileUpserted) {
+      await new Promise((r) => setTimeout(r, 900));
+    }
+
+    const verifyHostKeys = new Set<string>();
+    if (hostKey) verifyHostKeys.add(hostKey);
+    if (Array.isArray(body.hostAliases)) {
+      for (const alias of body.hostAliases) {
+        const k = normalizeHostKey(String(alias));
+        if (k) verifyHostKeys.add(k);
+      }
+    }
+
+    let storeAfter = await readStore();
     let verify: {
       mainLandingEnabled: boolean;
       keyword: string;
       designId: string;
     } = { mainLandingEnabled: false, keyword: "", designId: "" };
     if (multiHost && hostKey) {
-      const profile = resolveHostProfile(storeAfter, hostKey);
-      const ml = profile?.mainLanding;
-      verify = {
-        mainLandingEnabled: mainLandingEnabled({ mainLanding: ml }),
-        keyword: String(ml?.vendor?.keyword || profile?.siteName || "").trim(),
-        designId: String(ml?.designId || "").trim(),
-      };
+      const readAttempts = hostProfileUpserted ? 12 : 1;
+      const readBackoffMs = 500;
+      for (let attempt = 0; attempt < readAttempts; attempt += 1) {
+        let profile = null;
+        for (const k of verifyHostKeys) {
+          const candidate = resolveHostProfile(storeAfter, k);
+          if (candidate?.mainLanding?.enabled) {
+            profile = candidate;
+            break;
+          }
+          if (candidate && !profile) profile = candidate;
+        }
+        if (!profile) profile = resolveHostProfile(storeAfter, hostKey);
+        const ml = profile?.mainLanding;
+        verify = {
+          mainLandingEnabled: mainLandingEnabled({ mainLanding: ml }),
+          keyword: String(ml?.vendor?.keyword || profile?.siteName || "").trim(),
+          designId: String(ml?.designId || "").trim(),
+        };
+        if (verify.mainLandingEnabled || attempt >= readAttempts - 1) break;
+        await new Promise((r) => setTimeout(r, readBackoffMs));
+        storeAfter = await readStore();
+      }
     } else {
       const ml = parseMainLandingConfig(storeAfter.settings.mainLanding);
       verify = {
@@ -205,7 +238,11 @@ export async function POST(request: Request) {
       };
     }
 
-    const savedOk = multiHost && hostKey ? verify.mainLandingEnabled : true;
+    const savedOk =
+      multiHost && hostKey
+        ? hostProfileUpserted || verify.mainLandingEnabled
+        : true;
+    const verifyPending = multiHost && hostKey && hostProfileUpserted && !verify.mainLandingEnabled;
     return NextResponse.json({
       ok: savedOk,
       host: hostKey || undefined,
@@ -214,6 +251,7 @@ export async function POST(request: Request) {
       siteTagline: siteTagline || undefined,
       taglineGenerated,
       verify,
+      ...(verifyPending ? { verifyPending: true } : {}),
       ...(enrichError ? { enrichError } : {}),
       ...(!savedOk && multiHost
         ? { error: "host profile main landing not saved — retry publish or check Blob" }
