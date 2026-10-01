@@ -3,9 +3,8 @@ import { checkMasterPassword } from "@/lib/auth";
 import { getSettings, readStore, updateStore } from "@/lib/db";
 import {
   getHostProfile,
-  hostProfileFromBootstrapBody,
   normalizeHostKey,
-  parseHostSiteProfile,
+  resolveHostProfile,
   upsertKeywordHostProfile,
 } from "@/lib/host-profiles";
 import { enrichMainLandingCopy, mainLandingEnabled, parseMainLandingConfig } from "@/lib/main-landing";
@@ -50,6 +49,30 @@ export async function POST(request: Request) {
   const incomingTagline =
     typeof body.siteTagline === "string" && body.siteTagline.trim() ? body.siteTagline.trim() : "";
 
+  let siteTagline = incomingTagline;
+  let taglineGenerated = false;
+  if (!siteTagline || isBlandSiteTagline(siteTagline)) {
+    const settings = await getSettings();
+    const keyword = String(body.siteName || settings.siteName || "").trim();
+    if (keyword) {
+      const apiKey = geminiFromStudio || settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
+      const designId =
+        typeof body.mainLanding === "object" && body.mainLanding
+          ? String((body.mainLanding as { designId?: string }).designId || "scalp-tattoo-v1")
+          : "scalp-tattoo-v1";
+      siteTagline = await generateSiteTagline({
+        keyword,
+        vendorName: typeof body.company === "string" ? body.company : settings.company,
+        apiKey,
+        model: geminiModel || settings.geminiModel,
+        seed: `${keyword}|bootstrap${hostKey ? `|${hostKey}` : ""}`,
+        useGemini,
+        designId,
+      });
+      taglineGenerated = true;
+    }
+  }
+
   try {
     await updateStore((s) => {
       if (geminiFromStudio) s.settings.geminiApiKey = geminiFromStudio;
@@ -83,7 +106,7 @@ export async function POST(request: Request) {
               ? (mainLandingRaw as { vendor?: { name?: string } }).vendor?.name
               : body.company,
         };
-        if (incomingTagline) bootstrapBody.siteTagline = incomingTagline;
+        if (siteTagline) bootstrapBody.siteTagline = siteTagline;
         upsertKeywordHostProfile(s, hostKey, bootstrapBody);
         return;
       }
@@ -91,7 +114,7 @@ export async function POST(request: Request) {
       if (typeof body.siteName === "string" && body.siteName.trim()) {
         s.settings.siteName = body.siteName.trim();
       }
-      if (incomingTagline) s.settings.siteTagline = incomingTagline;
+      if (siteTagline) s.settings.siteTagline = siteTagline;
       if (typeof body.company === "string") s.settings.company = body.company.trim();
       if (typeof body.phone === "string") s.settings.phone = body.phone.trim();
       if (typeof body.address === "string") s.settings.address = body.address.trim();
@@ -107,48 +130,6 @@ export async function POST(request: Request) {
       }
     });
 
-    let siteTagline = incomingTagline;
-    let taglineGenerated = false;
-    if (!siteTagline || isBlandSiteTagline(siteTagline)) {
-      const settings = await getSettings();
-      const keyword = String(body.siteName || settings.siteName || "").trim();
-      if (keyword) {
-        const apiKey = geminiFromStudio || settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
-        const designId =
-          typeof body.mainLanding === "object" && body.mainLanding
-            ? String((body.mainLanding as { designId?: string }).designId || "scalp-tattoo-v1")
-            : "scalp-tattoo-v1";
-        siteTagline = await generateSiteTagline({
-          keyword,
-          vendorName: typeof body.company === "string" ? body.company : settings.company,
-          apiKey,
-          model: geminiModel || settings.geminiModel,
-          seed: `${keyword}|bootstrap${hostKey ? `|${hostKey}` : ""}`,
-          useGemini,
-          designId,
-        });
-        taglineGenerated = true;
-        await updateStore((s) => {
-          if (multiHost && hostKey) {
-            if (s.hostProfiles?.[hostKey]) {
-              s.hostProfiles[hostKey].siteTagline = siteTagline;
-              if (s.hostProfiles[hostKey].mainLanding?.vendor) {
-                s.hostProfiles[hostKey].mainLanding.vendor.intro = siteTagline;
-              }
-            } else {
-              upsertKeywordHostProfile(s, hostKey, {
-                ...(body as Record<string, unknown>),
-                siteTagline,
-                mainLanding: body.mainLanding,
-              });
-            }
-          } else {
-            s.settings.siteTagline = siteTagline;
-          }
-        });
-      }
-    }
-
     let enriched = false;
     let enrichError = "";
     if (wantEnrich) {
@@ -163,7 +144,7 @@ export async function POST(request: Request) {
           let config = parseMainLandingConfig(body.mainLanding);
           if (multiHost && hostKey) {
             const store = await readStore();
-            const storeProfile = store.hostProfiles?.[hostKey];
+            const storeProfile = resolveHostProfile(store, hostKey);
             if (storeProfile?.mainLanding) config = parseMainLandingConfig(storeProfile.mainLanding);
           } else {
             config = parseMainLandingConfig(settings.mainLanding);
@@ -184,11 +165,11 @@ export async function POST(request: Request) {
               enrichedAt,
             });
             if (multiHost && hostKey) {
-              if (!s.hostProfiles) s.hostProfiles = {};
-              const row = s.hostProfiles[hostKey] || hostProfileFromBootstrapBody(body as Record<string, unknown>);
-              row.mainLanding = nextLanding;
-              row.updatedAt = enrichedAt;
-              s.hostProfiles[hostKey] = row;
+              upsertKeywordHostProfile(s, hostKey, {
+                ...(body as Record<string, unknown>),
+                siteTagline: siteTagline || incomingTagline,
+                mainLanding: nextLanding,
+              });
             } else {
               s.settings.mainLanding = nextLanding;
             }
@@ -225,8 +206,9 @@ export async function POST(request: Request) {
       };
     }
 
+    const savedOk = multiHost && hostKey ? verify.mainLandingEnabled : true;
     return NextResponse.json({
-      ok: true,
+      ok: savedOk,
       host: hostKey || undefined,
       multiHost,
       enriched,
@@ -234,6 +216,9 @@ export async function POST(request: Request) {
       taglineGenerated,
       verify,
       ...(enrichError ? { enrichError } : {}),
+      ...(!savedOk && multiHost
+        ? { error: "host profile main landing not saved — retry publish or check Blob" }
+        : {}),
     });
   } catch (err) {
     return persistFail(err);

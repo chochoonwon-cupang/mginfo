@@ -848,16 +848,12 @@ function bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, 
     if (expectDesignId && design && design !== expectDesignId) return false;
     return true;
   }
-  if (data?.ok === true) {
-    const savedHost = normalizeHostForCompare(data.host);
-    const hosts = [expectHost, ...hostCandidates]
-      .map(normalizeHostForCompare)
-      .filter(Boolean);
-    if (!data.multiHost) return true;
-    if (!savedHost) return true;
-    if (!hosts.length) return true;
-    if (hosts.includes(savedHost)) return true;
-    return true;
+  if (data?.ok === true && !data?.multiHost) return true;
+  if (data?.ok === true && data?.multiHost && expectHost && expectDesignId) {
+    return false;
+  }
+  if (data?.ok === true && data?.multiHost) {
+    return Boolean(data.verify?.mainLandingEnabled);
   }
   return false;
 }
@@ -911,12 +907,12 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
           else onLog(`메인 디자인 ON · 블로그 설정을 적용했습니다: ${base}`);
 
           const hostCandidates = Array.isArray(opts.hostCandidates) ? opts.hostCandidates : [];
-          if (
-            bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates) ||
-            (!data.error && data.ok !== false)
-          ) {
+          if (bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates)) {
             onLog(`메인 디자인 저장 확인 완료 (bootstrap): ${base}`);
             return true;
+          }
+          if (data?.ok === false || data?.error) {
+            onLog(`bootstrap 저장 실패: ${data.error || "host profile 미저장"} (${base})`);
           }
 
           const verified = await verifyMainLanding(bases, expectKeyword, {
