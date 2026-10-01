@@ -15,6 +15,7 @@ export function MainLandingSettings() {
   const [enriching, setEnriching] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [hostNote, setHostNote] = useState("");
 
   useEffect(() => {
     fetch("/api/settings")
@@ -25,6 +26,15 @@ export function MainLandingSettings() {
           Boolean(data.settings?.hasKey) ||
             (typeof data.settings?.geminiApiKey === "string" && data.settings.geminiApiKey.includes("•"))
         );
+        if (data.hostScoped && data.hostKey) {
+          setHostNote(
+            data.hasHostProfile
+              ? `이 도메인(${data.hostKey}) 전용 메인 설정입니다. 저장하면 공개 홈에 반영됩니다.`
+              : `키워드 도메인(${data.hostKey})입니다. 아직 전용 프로필이 없어 전역 설정을 보여 줍니다. 저장하면 이 도메인에만 적용됩니다.`
+          );
+        } else {
+          setHostNote("");
+        }
       })
       .catch(() => setError("설정을 불러오지 못했습니다."));
   }, []);
@@ -50,7 +60,9 @@ export function MainLandingSettings() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "저장 실패");
       setMessage(
-        "저장했습니다. 메인 랜딩을 켜 두면 홈이 두피문신 디자인으로 바뀌고, 블로그는 /posts 입니다."
+        hostNote
+          ? "저장했습니다. 이 도메인 홈을 새로고침해 확인하세요."
+          : "저장했습니다. 메인 랜딩을 켜 두면 홈이 메인 디자인으로 바뀌고, 블로그는 /posts 입니다."
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "저장 실패");
@@ -97,6 +109,7 @@ export function MainLandingSettings() {
   return (
     <form className="admin-card admin-form" onSubmit={onSave}>
       <h2>메인 사이트</h2>
+      {hostNote ? <p className="admin-hint">{hostNote}</p> : null}
       <div className="ml-field-map">
         <strong>최소 입력 → 필릭스형 페이지 자동 구성</strong>
         <br />

@@ -5,7 +5,8 @@ import { SitePopup } from "@/components/SitePopup";
 import { BottomNav, Footer, Header } from "@/components/Header";
 import { JsonLd } from "@/components/seo/JsonLd";
 import { displaySiteName, siteBrand } from "@/lib/categories";
-import { getCategories, getSettings, resolveSiteTheme } from "@/lib/db";
+import { getCategories, getSettings, getSettingsForRequestHost, resolveSiteTheme } from "@/lib/db";
+import { getRequestHost } from "@/lib/host-profiles";
 import { engagementFromSettings } from "@/lib/engagement";
 import { buildOrganizationJsonLd, buildWebSiteJsonLd } from "@/lib/site-jsonld";
 import type { SiteTheme } from "@/lib/site-theme";
@@ -26,11 +27,13 @@ export async function SiteFrame({
   /** Skip magazine chrome (used by brand main landing). */
   bare?: boolean;
 }) {
-  const [theme, settings, categories] = await Promise.all([
+  const host = await getRequestHost();
+  const [theme, baseSettings, categories] = await Promise.all([
     resolveSiteTheme(),
     getSettings(),
     getCategories(),
   ]);
+  const settings = host ? await getSettingsForRequestHost(host) : baseSettings;
   const siteName = displaySiteName(settings.siteName);
   const { description } = siteBrand(settings);
   const mainLandingOn = Boolean(settings.mainLanding?.enabled);

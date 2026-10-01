@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { isAdminSession, isMasterSession, siteAccountFrom, validateSiteAccount } from "@/lib/auth";
-import { getSettings, updateStore } from "@/lib/db";
+import { getSettings, getSettingsForRequestHost, readStore, updateStore } from "@/lib/db";
+import {
+  applyHostScopedAdminPatch,
+  getRequestHost,
+  isKeywordSubdomainHost,
+  mergeHostIntoSettings,
+  resolveHostProfile,
+} from "@/lib/host-profiles";
 import {
   DEFAULT_COMMENT_MAX,
   DEFAULT_COMMENT_MIN,
@@ -19,15 +26,35 @@ import { normalizeHttpUrl } from "@/lib/vendor";
 import { parseMainLandingConfig } from "@/lib/main-landing";
 import { parseHubPortalConfig } from "@/lib/hub-portal";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   if (!(await isAdminSession())) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  const settings = await getSettings();
+  const host = await getRequestHost();
+  const globalSettings = await getSettings();
+  let settings = globalSettings;
+  let hostScoped = false;
+  let hasHostProfile = false;
+  if (host && isKeywordSubdomainHost(host)) {
+    hostScoped = true;
+    const store = await readStore();
+    const profile = resolveHostProfile(store, host);
+    hasHostProfile = Boolean(profile);
+    settings = profile
+      ? mergeHostIntoSettings(globalSettings, profile)
+      : globalSettings;
+  } else if (host) {
+    settings = await getSettingsForRequestHost(host);
+  }
   const master = await isMasterSession();
   const { geminiApiKey, geminiModel, naverSiteVerification, sitePassword, publishBannedKeywords, ...rest } = settings;
   return NextResponse.json({
     opsHub: await isOpsHub(),
+    hostScoped,
+    hasHostProfile,
+    hostKey: hostScoped ? host : undefined,
     settings: {
       ...rest,
       geminiApiKey: master && geminiApiKey ? `${geminiApiKey.slice(0, 6)}••••${geminiApiKey.slice(-4)}` : "",
@@ -79,9 +106,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: invalid }, { status: 400 });
     }
   }
+  const requestHost = await getRequestHost();
+  const keywordSubdomain = Boolean(requestHost && isKeywordSubdomainHost(requestHost));
   try {
     await updateStore((s) => {
       applyMasterSettingsPatch(s, body);
+      if (keywordSubdomain) {
+        applyHostScopedAdminPatch(s, requestHost, body as Record<string, unknown>);
+      }
       const textKeys = [
         "siteName",
         "siteTagline",
@@ -100,8 +132,20 @@ export async function POST(request: Request) {
         "writingPersona",
         "footerDisclaimer",
       ] as const;
+      const hostOnlyText = new Set([
+        "siteName",
+        "siteTagline",
+        "company",
+        "ceo",
+        "bizNo",
+        "address",
+        "phone",
+        "email",
+        "footerDisclaimer",
+      ]);
       for (const key of textKeys) {
         if (typeof body[key] === "string") {
+          if (keywordSubdomain && hostOnlyText.has(key)) continue;
           s.settings[key] = body[key].trim();
         }
       }
@@ -137,7 +181,7 @@ export async function POST(request: Request) {
         s.settings.commentCountMin = comments.min;
         s.settings.commentCountMax = comments.max;
       }
-      if (body.mainLanding !== undefined) {
+      if (body.mainLanding !== undefined && !keywordSubdomain) {
         s.settings.mainLanding = parseMainLandingConfig(body.mainLanding);
       }
       if (body.hubPortal !== undefined) {

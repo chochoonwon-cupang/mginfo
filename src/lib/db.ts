@@ -31,7 +31,23 @@ import {
   normalizeHostKey,
   normalizeHostProfiles,
 } from "./host-profiles";
+import { toUnicode } from "node:punycode";
 import { apexDomain, subdomainLabel } from "./ops-ledger";
+
+function keywordSiteNameFromHost(host: string): string {
+  const apex = apexDomain(host);
+  const label = subdomainLabel(host, apex);
+  if (!label || label === "@") return host.split(".")[0] || "";
+  const segment = (label.split(".")[0] || label).trim();
+  if (segment.toLowerCase().startsWith("xn--")) {
+    try {
+      return toUnicode(segment);
+    } catch {
+      return segment;
+    }
+  }
+  return segment;
+}
 import { normalizeVendorGroups } from "./vendor-groups";
 
 const LOCAL_PATH = path.join(process.cwd(), "data", "store.json");
@@ -191,7 +207,12 @@ export class PersistError extends Error {
 async function loadStore(): Promise<Store> {
   const building = process.env.NEXT_PHASE === "phase-production-build";
   if (hasBlobStore()) {
-    const remote = await blobGetJson<Store>();
+    let remote: Store | null = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      remote = await blobGetJson<Store>();
+      if (remote) break;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 150));
+    }
     if (remote) return persistSeededVendors(remote, building, (store) => blobSetJson(store));
     const initial = defaultStore();
     if (building) return initial;
@@ -375,9 +396,7 @@ export async function getSettingsForRequestHost(requestHost?: string): Promise<S
   const profile = getHostProfile(store, host);
   if (profile) return mergeHostIntoSettings(store.settings, profile);
   if (isKeywordSubdomainHost(host)) {
-    const apex = apexDomain(host);
-    const label = subdomainLabel(host, apex).replace(/^@$/, "");
-    const fallbackName = label && label !== "@" ? label : host.split(".")[0] || store.settings.siteName;
+    const fallbackName = keywordSiteNameFromHost(host) || store.settings.siteName;
     return mergeHostIntoSettings(store.settings, {
       siteName: fallbackName,
       mainLanding: parseMainLandingConfig({ enabled: false }),

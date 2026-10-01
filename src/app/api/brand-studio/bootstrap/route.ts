@@ -6,6 +6,7 @@ import {
   hostProfileFromBootstrapBody,
   normalizeHostKey,
   parseHostSiteProfile,
+  upsertKeywordHostProfile,
 } from "@/lib/host-profiles";
 import { enrichMainLandingCopy, mainLandingEnabled, parseMainLandingConfig } from "@/lib/main-landing";
 import { persistFail } from "@/lib/persist-api";
@@ -59,8 +60,6 @@ export async function POST(request: Request) {
       }
 
       if (multiHost) {
-        if (!s.hostProfiles) s.hostProfiles = {};
-        const prev = s.hostProfiles[hostKey];
         const keyword = String(body.siteName || body.mainLanding?.vendor?.keyword || "").trim();
         const groups = normalizeVendorGroups(s.vendorGroups);
         let mainLandingRaw = body.mainLanding;
@@ -76,41 +75,16 @@ export async function POST(request: Request) {
           };
           (body as Record<string, unknown>)._vendorGroupId = merged.groupId;
         }
-        const draft = hostProfileFromBootstrapBody({
+        const bootstrapBody: Record<string, unknown> = {
           ...(body as Record<string, unknown>),
           mainLanding: mainLandingRaw,
           company:
             (body as Record<string, unknown>)._vendorGroupId && mainLandingRaw
               ? (mainLandingRaw as { vendor?: { name?: string } }).vendor?.name
               : body.company,
-        });
-        const profile = parseHostSiteProfile(
-          {
-            ...draft,
-            vendorGroupId:
-              typeof (body as Record<string, unknown>)._vendorGroupId === "string"
-                ? ((body as Record<string, unknown>)._vendorGroupId as string)
-                : prev?.vendorGroupId,
-            mainLanding: parseMainLandingConfig({
-              ...draft.mainLanding,
-              enabled: true,
-            }),
-          },
-          prev
-        );
-        if (profile) {
-          const aliasKeys = new Set<string>([hostKey]);
-          if (Array.isArray(body.hostAliases)) {
-            for (const alias of body.hostAliases) {
-              const k = normalizeHostKey(String(alias || ""));
-              if (k) aliasKeys.add(k);
-            }
-          }
-          for (const k of aliasKeys) {
-            s.hostProfiles[k] = profile;
-          }
-          s.settings.mainLanding = parseMainLandingConfig({ enabled: false });
-        }
+        };
+        if (incomingTagline) bootstrapBody.siteTagline = incomingTagline;
+        upsertKeywordHostProfile(s, hostKey, bootstrapBody);
         return;
       }
 
@@ -155,10 +129,18 @@ export async function POST(request: Request) {
         });
         taglineGenerated = true;
         await updateStore((s) => {
-          if (multiHost && hostKey && s.hostProfiles?.[hostKey]) {
-            s.hostProfiles[hostKey].siteTagline = siteTagline;
-            if (s.hostProfiles[hostKey].mainLanding?.vendor) {
-              s.hostProfiles[hostKey].mainLanding.vendor.intro = siteTagline;
+          if (multiHost && hostKey) {
+            if (s.hostProfiles?.[hostKey]) {
+              s.hostProfiles[hostKey].siteTagline = siteTagline;
+              if (s.hostProfiles[hostKey].mainLanding?.vendor) {
+                s.hostProfiles[hostKey].mainLanding.vendor.intro = siteTagline;
+              }
+            } else {
+              upsertKeywordHostProfile(s, hostKey, {
+                ...(body as Record<string, unknown>),
+                siteTagline,
+                mainLanding: body.mainLanding,
+              });
             }
           } else {
             s.settings.siteTagline = siteTagline;

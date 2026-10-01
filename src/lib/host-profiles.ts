@@ -1,4 +1,5 @@
 import { headers } from "next/headers";
+import { toASCII, toUnicode } from "node:punycode";
 import { apexDomain, cleanHost } from "./ops-ledger";
 import { parseMainLandingConfig, type MainLandingConfig } from "./main-landing";
 import type { HostSiteProfile, Settings, Store } from "./types";
@@ -74,6 +75,24 @@ function profileHostAliases(host: string): string[] {
   } catch {
     /* ignore */
   }
+  const parts = key.split(".");
+  if (parts.length >= 2) {
+    const apex = parts.slice(-2).join(".");
+    const label = parts.slice(0, -2).join(".") || parts[0];
+    if (label?.toLowerCase().startsWith("xn--")) {
+      try {
+        out.add(`${toUnicode(label)}.${apex}`.toLowerCase());
+      } catch {
+        /* ignore */
+      }
+    } else if (label && /[^\x00-\x7f]/.test(label)) {
+      try {
+        out.add(`${toASCII(label)}.${apex}`.toLowerCase());
+      } catch {
+        /* ignore */
+      }
+    }
+  }
   return [...out];
 }
 
@@ -104,6 +123,111 @@ export function mergeHostIntoSettings(global: Settings, profile: HostSiteProfile
     naverSiteVerification: profile.naverSiteVerification || global.naverSiteVerification,
     mainLanding: profile.mainLanding,
   };
+}
+
+const HOST_SCOPED_ADMIN_TEXT_KEYS = [
+  "siteName",
+  "siteTagline",
+  "company",
+  "ceo",
+  "bizNo",
+  "address",
+  "phone",
+  "email",
+  "footerDisclaimer",
+] as const;
+
+function hostProfileSeedFromGlobal(global: Settings): HostSiteProfile {
+  return parseHostSiteProfile({
+    siteName: global.siteName,
+    siteTagline: global.siteTagline,
+    company: global.company,
+    phone: global.phone,
+    address: global.address,
+    bizNo: global.bizNo,
+    mainLanding: global.mainLanding,
+  })!;
+}
+
+/** Admin / enrich on keyword subdomain → persist hostProfiles (public `/` reads this). */
+export function applyHostScopedAdminPatch(
+  store: Store,
+  host: string,
+  body: Record<string, unknown>
+): boolean {
+  const hostKey = normalizeHostKey(host);
+  if (!hostKey || !isKeywordSubdomainHost(hostKey)) return false;
+
+  const touchesHost =
+    body.mainLanding !== undefined ||
+    HOST_SCOPED_ADMIN_TEXT_KEYS.some((k) => typeof body[k] === "string");
+  if (!touchesHost) return false;
+
+  if (!store.hostProfiles) store.hostProfiles = {};
+  const prev = resolveHostProfile(store, hostKey);
+  const seed = prev || hostProfileSeedFromGlobal(store.settings);
+  const row: Record<string, unknown> = { ...seed };
+
+  for (const key of HOST_SCOPED_ADMIN_TEXT_KEYS) {
+    if (typeof body[key] === "string") {
+      row[key] = body[key].trim();
+    }
+  }
+  if (body.mainLanding !== undefined) {
+    row.mainLanding = parseMainLandingConfig(body.mainLanding);
+  }
+  row.updatedAt = new Date().toISOString();
+
+  const profile = parseHostSiteProfile(row, prev);
+  if (!profile) return true;
+
+  store.hostProfiles[hostKey] = profile;
+  if (body.mainLanding !== undefined) {
+    store.settings.mainLanding = parseMainLandingConfig({ enabled: false });
+  }
+  return true;
+}
+
+export function saveHostProfileMainLanding(store: Store, host: string, mainLanding: MainLandingConfig): void {
+  applyHostScopedAdminPatch(store, host, { mainLanding });
+}
+
+/** Bootstrap / master PUT — write keyword subdomain profile (public home reads this). */
+export function upsertKeywordHostProfile(
+  store: Store,
+  host: string,
+  body: Record<string, unknown>
+): HostSiteProfile | null {
+  const hostKey = normalizeHostKey(host);
+  if (!hostKey || !isKeywordSubdomainHost(hostKey)) return null;
+
+  if (!store.hostProfiles) store.hostProfiles = {};
+  const prev = resolveHostProfile(store, hostKey);
+  const draft = hostProfileFromBootstrapBody(body);
+  const profile = parseHostSiteProfile(
+    {
+      ...draft,
+      mainLanding: parseMainLandingConfig({
+        ...draft.mainLanding,
+        enabled: true,
+      }),
+    },
+    prev
+  );
+  if (!profile) return null;
+
+  const aliasKeys = new Set<string>([hostKey]);
+  if (Array.isArray(body.hostAliases)) {
+    for (const alias of body.hostAliases) {
+      const k = normalizeHostKey(String(alias || ""));
+      if (k) aliasKeys.add(k);
+    }
+  }
+  for (const k of aliasKeys) {
+    store.hostProfiles[k] = profile;
+  }
+  store.settings.mainLanding = parseMainLandingConfig({ enabled: false });
+  return profile;
 }
 
 export function hostProfileFromBootstrapBody(body: Record<string, unknown>): HostSiteProfile {

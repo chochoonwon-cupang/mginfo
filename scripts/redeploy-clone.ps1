@@ -22,5 +22,18 @@ Get-Content $envPath -Encoding UTF8 | ForEach-Object {
 }
 $env:VERCEL_PROJECT = $Project
 Write-Host "Production deploy clone: $($env:VERCEL_SCOPE)/$Project ..."
-& npx vercel deploy --prod --yes --force -t $env:VERCEL_TOKEN -S $env:VERCEL_SCOPE
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$vercelDir = Join-Path $root ".vercel"
+$backup = Join-Path $root ".vercel.mginfo-backup"
+if (Test-Path $vercelDir) {
+  if (Test-Path $backup) { Remove-Item -Recurse -Force $backup }
+  Rename-Item $vercelDir $backup
+}
+try {
+  & npx vercel link --yes --project $Project -t $env:VERCEL_TOKEN -S $env:VERCEL_SCOPE --non-interactive
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  & npx vercel deploy --prod --yes --force -t $env:VERCEL_TOKEN -S $env:VERCEL_SCOPE
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} finally {
+  if (Test-Path $vercelDir) { Remove-Item -Recurse -Force $vercelDir }
+  if (Test-Path $backup) { Rename-Item $backup $vercelDir }
+}

@@ -1,10 +1,17 @@
 import { NextResponse } from "next/server";
 import { checkMasterPassword } from "@/lib/auth";
 import { readStore } from "@/lib/db";
-import { getHostProfile, normalizeHostKey, resolveHostProfile } from "@/lib/host-profiles";
+import {
+  getHostProfile,
+  isKeywordSubdomainHost,
+  normalizeHostKey,
+  resolveHostProfile,
+  upsertKeywordHostProfile,
+} from "@/lib/host-profiles";
 import { mainLandingEnabled } from "@/lib/main-landing";
 import { updateStore } from "@/lib/db";
 import { revalidatePublicSite } from "@/lib/public-cache";
+import type { HostSiteProfile } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +41,39 @@ export async function GET(request: Request) {
     enabled,
     keyword,
     designId,
+  });
+}
+
+/** Master upsert — keyword subdomain main landing (when admin/bootstrap blob write fails). */
+export async function PUT(request: Request) {
+  const secret = request.headers.get("x-infocs-master") || "";
+  if (!checkMasterPassword(secret)) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const host = normalizeHostKey(
+    typeof body.host === "string" ? body.host : typeof body.domain === "string" ? body.domain : ""
+  );
+  if (!host || !isKeywordSubdomainHost(host)) {
+    return NextResponse.json({ error: "keyword subdomain host required" }, { status: 400 });
+  }
+  if (body.mainLanding === undefined) {
+    return NextResponse.json({ error: "mainLanding required" }, { status: 400 });
+  }
+  const saved: { profile: HostSiteProfile | null } = { profile: null };
+  await updateStore((s) => {
+    saved.profile = upsertKeywordHostProfile(s, host, body);
+  });
+  revalidatePublicSite();
+  const profile = saved.profile;
+  const ml = profile?.mainLanding;
+  return NextResponse.json({
+    ok: Boolean(profile),
+    host,
+    found: Boolean(profile),
+    enabled: mainLandingEnabled({ mainLanding: ml }),
+    keyword: String(ml?.vendor?.keyword || profile?.siteName || "").trim(),
+    designId: String(ml?.designId || "").trim(),
   });
 }
 

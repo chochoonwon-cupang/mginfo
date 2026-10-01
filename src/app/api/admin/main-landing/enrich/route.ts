@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkMasterPassword, isAdminSession } from "@/lib/auth";
-import { getSettings, updateStore } from "@/lib/db";
+import { getSettings, getSettingsForRequestHost, updateStore } from "@/lib/db";
+import { getRequestHost, isKeywordSubdomainHost, saveHostProfileMainLanding } from "@/lib/host-profiles";
 import { enrichMainLandingCopy, parseMainLandingConfig } from "@/lib/main-landing";
 import { persistFail } from "@/lib/persist-api";
 import { revalidatePublicSite } from "@/lib/public-cache";
@@ -27,7 +28,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-  const settings = await getSettings();
+  const requestHost = await getRequestHost();
+  const settings = requestHost
+    ? await getSettingsForRequestHost(requestHost)
+    : await getSettings();
+  const keywordSubdomain = Boolean(requestHost && isKeywordSubdomainHost(requestHost));
   const apiKey = pickGeminiKey(body, settings.geminiApiKey || "");
   if (!apiKey) {
     return NextResponse.json(
@@ -86,7 +91,11 @@ export async function POST(request: Request) {
         enrichedAt,
         variationSeed: baseConfig.variationSeed,
       });
-      s.settings.mainLanding = next;
+      if (keywordSubdomain) {
+        saveHostProfileMainLanding(s, requestHost, next);
+      } else {
+        s.settings.mainLanding = next;
+      }
       saved = next;
     });
     revalidatePublicSite();
