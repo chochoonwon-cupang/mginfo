@@ -1,5 +1,5 @@
 import { FELIX_SCALP_DEFAULT, fillDeep, type FelixTemplateVars } from "../felix-defaults";
-import { extractRegionLabel, findRegionHint, resolveVendorAddress } from "../auto-address";
+import { extractRegionLabel, findRegionHint, pickRegionDong, resolveVendorAddress } from "../auto-address";
 import type { MainLandingCopy, MainLandingVendor } from "../types";
 
 export const SCALP_TATTOO_V1 = {
@@ -30,7 +30,7 @@ export function inferPlace(vendor: MainLandingVendor, region: string): string {
   const dong = address.match(/([가-힣]+(?:동|읍|면|로|길))/);
   if (dong?.[1]) return dong[1];
   const hint = findRegionHint(vendor.keyword || "");
-  if (hint?.dong) return hint.dong;
+  if (hint?.dongs?.length) return pickRegionDong(vendor.keyword || "", hint);
   if (/국제도시|비전동|청라/.test(address)) {
     const hit = address.match(/(청라국제도시|비전동|청라|비전)/);
     if (hit) return hit[1];

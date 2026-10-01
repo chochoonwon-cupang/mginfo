@@ -13,6 +13,10 @@ import { mergeImageUrls, pickRandomPostImages } from "./image-pool";
 import { parseVendorFields } from "./vendor";
 import { parseYoutubeUrlPair, preferYoutubePair } from "./youtube";
 import { ensureVendorSlots } from "./vendor-slots";
+import { defaultPilotConfig, normalizePilotConfig, type BulkPilotConfig } from "./pilot-config";
+import { appendPilotEvent, countPilotPublishedToday } from "./pilot-store";
+import { samplePublicPilotPage } from "./pilot-sample";
+import { revalidatePublicSite } from "./public-cache";
 import type {
   BulkGroup,
   BulkKeyword,
@@ -33,7 +37,7 @@ export const DEFAULT_BULK_SCHEDULE: BulkSchedule = {
 };
 
 export function defaultBulkPublish(): BulkPublishState {
-  return { schedule: { ...DEFAULT_BULK_SCHEDULE }, groups: [] };
+  return { schedule: { ...DEFAULT_BULK_SCHEDULE }, groups: [], pilot: defaultPilotConfig() };
 }
 
 export function normalizeBulkPublish(value?: Partial<BulkPublishState> | null): BulkPublishState {
@@ -43,7 +47,7 @@ export function normalizeBulkPublish(value?: Partial<BulkPublishState> | null): 
   if (schedule.endHour <= schedule.startHour) schedule.endHour = 23;
   schedule.planDate = String(schedule.planDate || "");
   const groups = Array.isArray(value?.groups) ? value.groups.map(normalizeGroup).filter(Boolean) as BulkGroup[] : [];
-  return { schedule, groups };
+  return { schedule, groups, pilot: normalizePilotConfig(value?.pilot) };
 }
 
 function clampHour(value: unknown, fallback: number) {
@@ -146,6 +150,24 @@ export function randomPublishSlots(count: number, start: Date, end: Date): Date[
   return slots;
 }
 
+/** Spread `count` publish times evenly across [start, end). No midnight pile-up. */
+export function evenPublishSlots(count: number, start: Date, end: Date): Date[] {
+  if (count <= 0) return [];
+  const startMs = start.getTime();
+  const endMs = Math.max(startMs + 60_000, end.getTime());
+  const span = endMs - startMs;
+  if (count === 1) {
+    return [new Date(startMs + Math.floor(span / 2))];
+  }
+  const slots: Date[] = [];
+  for (let i = 0; i < count; i += 1) {
+    // (i+0.5)/count keeps first/last away from exact edges and spaces evenly.
+    const t = startMs + Math.floor(((i + 0.5) / count) * span);
+    slots.push(new Date(Math.min(endMs - 1_000, Math.max(startMs, t))));
+  }
+  return slots;
+}
+
 function openKeywords(group: BulkGroup) {
   return group.keywords.filter((item) => item.status === "queued" || item.status === "scheduled");
 }
@@ -162,7 +184,11 @@ function usedTodayQuota(group: BulkGroup, today: string) {
   }).length;
 }
 
-export function planToday(store: Store, now = new Date()) {
+export function planToday(
+  store: Store,
+  now = new Date(),
+  opts?: { pilotRemaining?: number }
+) {
   const state = store.bulkPublish;
   const today = seoulDateKey(now);
   if (!today || !state.schedule.enabled) return { planned: 0, reason: "off" as const };
@@ -176,6 +202,9 @@ export function planToday(store: Store, now = new Date()) {
   const masterLimit = Number(store.settings.dailyPostLimit) || 0;
   const used = countPostsCreatedToday(store.posts);
   let remaining = masterLimit > 0 ? Math.max(0, masterLimit - used) : 999;
+  if (typeof opts?.pilotRemaining === "number") {
+    remaining = Math.min(remaining, Math.max(0, opts.pilotRemaining));
+  }
 
   const picks: BulkKeyword[] = [];
   for (const group of state.groups) {
@@ -281,18 +310,69 @@ const MAX_PER_TICK = 6;
 /** Stop starting new Gemini jobs before Vercel `maxDuration` (300s) hard-timeout. */
 const TICK_BUDGET_MS = 240_000;
 
-export async function publishDueBulk(store: Store, opts: { mutator: typeof import("./db").updateStore }) {
+export type BulkPublishTickResult = {
+  processed: number;
+  results: Array<{
+    keyword: string;
+    ok: boolean;
+    skipped?: boolean;
+    held?: boolean;
+    error?: string;
+    slug?: string;
+    url?: string;
+    outcome?: string;
+  }>;
+  error?: string;
+  pilotPublishedToday?: number;
+};
+
+export async function publishDueBulk(
+  store: Store,
+  opts: { mutator: typeof import("./db").updateStore; siteOrigin?: string }
+): Promise<BulkPublishTickResult> {
   const createBlock = checkCanCreatePost(store.settings, store.posts);
   if (createBlock) return { processed: 0, results: [], error: createBlock };
   const publishBlock = checkCanPublish(store.settings);
   if (publishBlock) return { processed: 0, results: [], error: publishBlock };
 
+  const pilot = normalizePilotConfig(store.bulkPublish.pilot);
+  let pilotPublishedToday = 0;
+  if (pilot.enabled) {
+    pilotPublishedToday = await countPilotPublishedToday();
+    if (pilotPublishedToday >= pilot.dailySuccessLimit) {
+      return {
+        processed: 0,
+        results: [],
+        error: `Pilot 일일 성공 한도(${pilot.dailySuccessLimit}) 도달`,
+        pilotPublishedToday,
+      };
+    }
+  }
+
   const due = dueKeywords(store).slice(0, MAX_PER_TICK);
-  const results: { keyword: string; ok: boolean; error?: string }[] = [];
+  const results: BulkPublishTickResult["results"] = [];
   const tickStarted = Date.now();
+  const origin = (opts.siteOrigin || process.env.NEXT_PUBLIC_SITE_URL || "https://magazine.infocs.co.kr").replace(
+    /\/$/,
+    ""
+  );
 
   for (const item of due) {
     if (Date.now() - tickStarted >= TICK_BUDGET_MS) break;
+    if (pilot.enabled) {
+      pilotPublishedToday = await countPilotPublishedToday();
+      if (pilotPublishedToday >= pilot.dailySuccessLimit) {
+        results.push({
+          keyword: item.keyword.keyword,
+          ok: false,
+          skipped: true,
+          error: `Pilot 일일 성공 한도(${pilot.dailySuccessLimit})`,
+          outcome: "pilot_limit",
+        });
+        break;
+      }
+    }
+
     const claimed = await claimBulkKeyword(opts.mutator, item.keyword.id, "due");
     if (!claimed) continue;
     const limitBlock = checkCanCreatePost(claimed.store.settings, claimed.store.posts);
@@ -302,18 +382,195 @@ export async function publishDueBulk(store: Store, opts: { mutator: typeof impor
       break;
     }
     try {
-      const post = await generateAndSave(claimed.store, claimed.group, claimed.keyword);
+      const post = await generateAndSave(claimed.store, claimed.group, claimed.keyword, {
+        pilotMode: pilot.enabled,
+        pilot,
+      });
       const accepted = await finishBulkPublish(opts.mutator, item.keyword.id, claimed.claim, post);
       if (!accepted) continue;
-      await notifyPostIndexed(post.slug);
-      results.push({ keyword: item.keyword.keyword, ok: true });
+
+      let indexOk = true;
+      try {
+        await notifyPostIndexed(post.slug);
+      } catch {
+        indexOk = false;
+      }
+      try {
+        revalidatePublicSite();
+      } catch {
+        /* ignore */
+      }
+
+      const warn =
+        post.generationLog?.publishDecision === "WARN_PUBLISH" ||
+        (post.generationLog?.qualityChecks || []).some((c) => c.severity === "WARN");
+      const isLegacy =
+        post.generationMode === "legacy" || post.generationMode === "legacy_fallback";
+      const outcome = isLegacy ? "legacy_fallback" : warn ? "published_warn" : "published_pass";
+      const geminiCalls =
+        (post.generationLog?.plannerCalls || 0) + (post.generationLog?.writerCalls || 0);
+      const warningCodes = (post.generationLog?.qualityChecks || [])
+        .filter((c) => c.severity === "WARN")
+        .map((c) => c.code);
+
+      const event =
+        pilot.enabled
+          ? await appendPilotEvent({
+              keyword: item.keyword.keyword,
+              industryId: post.industryId || post.generationLog?.industryId,
+              slug: post.slug,
+              url: `${origin}/posts/${post.slug}`,
+              outcome,
+              publishDecision: post.generationLog?.publishDecision,
+              failureCategory: post.generationLog?.failureCategory,
+              generationMode: post.generationMode,
+              warningCodes,
+              plannerCalls: post.generationLog?.plannerCalls,
+              writerCalls: post.generationLog?.writerCalls,
+              plannerRetries: post.generationLog?.plannerRetries,
+              writerRetries: post.generationLog?.writerRetries,
+              geminiCalls,
+              inputTokens: sumTokens(
+                post.generationLog?.plannerTokens?.inputTokens,
+                post.generationLog?.writerTokens?.inputTokens
+              ),
+              outputTokens: sumTokens(
+                post.generationLog?.plannerTokens?.outputTokens,
+                post.generationLog?.writerTokens?.outputTokens
+              ),
+              totalTokens: sumTokens(
+                post.generationLog?.plannerTokens?.totalTokens,
+                post.generationLog?.writerTokens?.totalTokens
+              ),
+              legacyFallback: isLegacy,
+              message: indexOk ? undefined : "IndexNow 실패(Post 유지)",
+            }).catch(() => null)
+          : null;
+
+      if (event) {
+        samplePublicPilotPage(event.id, post.slug, origin).catch(() => undefined);
+      }
+
+      results.push({
+        keyword: item.keyword.keyword,
+        ok: true,
+        slug: post.slug,
+        url: `${origin}/posts/${post.slug}`,
+        outcome,
+      });
+      if (pilot.enabled) pilotPublishedToday += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : "발행 실패";
-      await failBulkClaim(opts.mutator, item.keyword.id, claimed.claim, message);
-      results.push({ keyword: item.keyword.keyword, ok: false, error: message });
+      const handled = await handlePilotPublishError({
+        mutator: opts.mutator,
+        keywordId: item.keyword.id,
+        claim: claimed.claim,
+        keyword: item.keyword.keyword,
+        message,
+        pilotEnabled: pilot.enabled,
+      });
+      results.push(handled.result);
     }
   }
-  return { processed: results.length, results };
+  return {
+    processed: results.length,
+    results,
+    pilotPublishedToday: pilot.enabled ? await countPilotPublishedToday() : undefined,
+  };
+}
+
+function sumTokens(a?: number | null, b?: number | null): number | null {
+  if (a == null && b == null) return null;
+  return (a || 0) + (b || 0);
+}
+
+async function handlePilotPublishError(input: {
+  mutator: typeof import("./db").updateStore;
+  keywordId: string;
+  claim: string;
+  keyword: string;
+  message: string;
+  pilotEnabled: boolean;
+}): Promise<{ result: BulkPublishTickResult["results"][number] }> {
+  const msg = input.message;
+  const isDup = /SLUG_EXISTS|KEYWORD_EXISTS/.test(msg);
+  const isUnresolved = /INDUSTRY_UNRESOLVED|industry unresolved|업종 미해결/i.test(msg);
+  const isIndustrySkip = /INDUSTRY_NOT_ALLOWED|Pilot 허용 업종/i.test(msg);
+  const isHold = /발행 HOLD/.test(msg);
+  const isVerified = /VERIFIED_DATA_FAILURE/.test(msg);
+  const isQuality = /QUALITY_FAILURE/.test(msg);
+  const isTechnical = /TECHNICAL_FAILURE/.test(msg);
+
+  // Skip paths: leave keyword queued (do not burn as failed).
+  if (isDup || isUnresolved || isIndustrySkip) {
+    await releaseBulkClaim(input.mutator, input.keywordId, input.claim, "queued");
+    const outcome = isDup
+      ? "skipped_duplicate"
+      : isUnresolved
+        ? "skipped_unresolved"
+        : "skipped_industry";
+    if (input.pilotEnabled) {
+      await appendPilotEvent({
+        keyword: input.keyword,
+        outcome,
+        message: msg,
+      }).catch(() => undefined);
+    }
+    return {
+      result: {
+        keyword: input.keyword,
+        ok: false,
+        skipped: true,
+        error: msg,
+        outcome,
+      },
+    };
+  }
+
+  await failBulkClaim(input.mutator, input.keywordId, input.claim, msg);
+
+  let outcome: string = "error";
+  let failureCategory: string | undefined;
+  if (isHold) {
+    outcome = "held";
+    failureCategory = isVerified
+      ? "VERIFIED_DATA_FAILURE"
+      : isTechnical
+        ? "TECHNICAL_FAILURE"
+        : isQuality
+          ? "QUALITY_FAILURE"
+          : "QUALITY_FAILURE";
+  } else if (isVerified) {
+    outcome = "verified_data_failure";
+    failureCategory = "VERIFIED_DATA_FAILURE";
+  } else if (isQuality) {
+    outcome = "quality_failure";
+    failureCategory = "QUALITY_FAILURE";
+  } else if (isTechnical) {
+    outcome = "technical_failure";
+    failureCategory = "TECHNICAL_FAILURE";
+  }
+
+  if (input.pilotEnabled) {
+    await appendPilotEvent({
+      keyword: input.keyword,
+      outcome: outcome as never,
+      failureCategory,
+      message: msg,
+      geminiError: /gemini|timeout|fetch failed/i.test(msg),
+      jsonParseError: /JSON|parse/i.test(msg),
+    }).catch(() => undefined);
+  }
+
+  return {
+    result: {
+      keyword: input.keyword,
+      ok: false,
+      held: isHold,
+      error: msg,
+      outcome,
+    },
+  };
 }
 
 export async function publishBulkKeyword(
@@ -440,7 +697,12 @@ async function releaseBulkClaim(
   });
 }
 
-async function generateAndSave(store: Store, group: BulkGroup, item: BulkKeyword): Promise<Post> {
+async function generateAndSave(
+  store: Store,
+  group: BulkGroup,
+  item: BulkKeyword,
+  opts?: { pilotMode?: boolean; pilot?: BulkPilotConfig }
+): Promise<Post> {
   const keywordBan = bannedContentError(
     store.settings.publishBannedKeywords,
     item.keyword,
@@ -470,7 +732,30 @@ async function generateAndSave(store: Store, group: BulkGroup, item: BulkKeyword
     categoryNotes: cat?.geminiNotes,
     vendor,
     apiKey,
+    pilotMode: Boolean(opts?.pilotMode),
+    pilotAllowedIndustryIds: opts?.pilot?.allowedIndustryIds,
   });
+
+  if (article.generationMode === "held" || article.generationLog.publishDecision === "HOLD") {
+    const reason =
+      article.generationLog.fallbackReason ||
+      article.generationLog.errors.join("; ") ||
+      "validation fail";
+    if (/INDUSTRY_UNRESOLVED|INDUSTRY_NOT_ALLOWED/.test(reason)) {
+      throw new Error(reason);
+    }
+    throw new Error(
+      `발행 HOLD (${article.generationLog.failureCategory || "QUALITY_FAILURE"}): ${reason}`
+    );
+  }
+
+  // Pilot: never expand via silent legacy when industry was forced — already blocked in pipeline.
+  if (
+    opts?.pilotMode &&
+    (article.generationMode === "legacy" || article.generationMode === "legacy_fallback")
+  ) {
+    // Still publish if technical policy allowed legacy, but metrics mark legacy_fallback upstream.
+  }
 
   const generatedBan = bannedContentError(
     store.settings.publishBannedKeywords,
@@ -485,7 +770,12 @@ async function generateAndSave(store: Store, group: BulkGroup, item: BulkKeyword
   if (generatedBan) throw new Error(generatedBan);
   const now = new Date().toISOString();
   let slug = articleSlug(article.slugHint, item.keyword);
-  if (store.posts.some((p) => p.slug === slug)) slug = `${slug}-${Date.now().toString(36)}`;
+  if (store.posts.some((p) => p.slug === slug && p.status === "published")) {
+    throw new Error(`SLUG_EXISTS: 동일 slug 공개글 존재 — overwrite/suffix 금지 (${slug})`);
+  }
+  if (store.posts.some((p) => p.status === "published" && (p.focusKeyword || "").trim() === item.keyword.trim())) {
+    throw new Error(`KEYWORD_EXISTS: 동일 focusKeyword 공개글 존재 — ${item.keyword}`);
+  }
   const photos = pickRandomPostImages(group.imagePool || [], group.imageCountMin || 1, group.imageCountMax || 3);
   const youtube = preferYoutubePair(item, group);
   const post = applyGenerationMeta(
@@ -568,4 +858,19 @@ export function sanitizeScheduleInput(raw: unknown, prev: BulkSchedule): BulkSch
     },
     groups: [],
   }).schedule;
+}
+
+export function sanitizePilotInput(raw: unknown, prev?: BulkPilotConfig | null): BulkPilotConfig {
+  const base = normalizePilotConfig(prev);
+  if (!raw || typeof raw !== "object") return base;
+  const body = raw as Partial<BulkPilotConfig>;
+  return normalizePilotConfig({
+    ...base,
+    ...body,
+    enabled: typeof body.enabled === "boolean" ? body.enabled : base.enabled,
+    startedAt:
+      typeof body.enabled === "boolean" && body.enabled && !base.startedAt
+        ? new Date().toISOString()
+        : body.startedAt ?? base.startedAt,
+  });
 }

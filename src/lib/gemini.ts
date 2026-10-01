@@ -146,6 +146,10 @@ function seoRules(focusKeyword: string): string {
 - 키워드에 지역·품종·시술·메뉴가 있으면 그 대상의 고유 기준을 본문의 중심으로 삼는다.`;
 }
 
+/**
+ * @deprecated V1 Production Engine uses `generatePipelineArticle` / `generateBulkArticle`
+ * (Planner→Writer). Kept for QA compare and intentional legacy fallback only.
+ */
 export async function generateArticle(input: GenerateInput): Promise<GenerateResult> {
   const categoryName = input.categoryName || input.category;
   const focusKeyword = (input.focusKeyword || "").trim();

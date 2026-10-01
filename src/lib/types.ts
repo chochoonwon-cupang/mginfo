@@ -1,6 +1,20 @@
 import type { MainLandingConfig } from "./main-landing/types";
 import type { HubPortalConfig } from "./hub-portal/types";
 
+/** Per-domain home/main landing (multi-tenant single Vercel project). */
+export type HostSiteProfile = {
+  siteName?: string;
+  siteTagline?: string;
+  company?: string;
+  phone?: string;
+  address?: string;
+  bizNo?: string;
+  naverSiteVerification?: string;
+  vendorGroupId?: string;
+  mainLanding: MainLandingConfig;
+  updatedAt?: string;
+};
+
 export type CategorySlug = string;
 
 export type CategoryVendorMode = "all" | "region";
@@ -267,4 +281,8 @@ export type Store = {
   categories: Category[];
   settings: Settings;
   bulkPublish: BulkPublishState;
+  /** Per-host main landing + vendor (shared posts/settings). */
+  hostProfiles?: Record<string, HostSiteProfile>;
+  /** Region keyword → shared vendor (Brand Studio). */
+  vendorGroups?: import("./vendor-groups").VendorGroupRecord[];
 };

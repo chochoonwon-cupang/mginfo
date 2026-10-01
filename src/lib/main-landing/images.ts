@@ -1,4 +1,5 @@
 import { discoverWebFolderImages } from "../web-image-folder";
+import { defaultDemolitionImageUrls, DEFAULT_DEMOLITION_IMAGE_FOLDER } from "./demolition-images";
 import type { MainLandingConfig, MainLandingResolvedImages } from "./types";
 import { resolveVariationSeed } from "./vary";
 
@@ -63,13 +64,19 @@ export async function resolveMainLandingImages(
 ): Promise<MainLandingResolvedImages> {
   const slots = config.slots || {};
   let pool: string[] = [];
-  if (config.imageFolderUrl) {
+  const folder =
+    String(config.imageFolderUrl || "").trim() ||
+    (config.designId === "demolition-v1" ? DEFAULT_DEMOLITION_IMAGE_FOLDER : "");
+  if (folder) {
     try {
-      const found = await discoverWebFolderImages(config.imageFolderUrl);
+      const found = await discoverWebFolderImages(folder);
       pool = (found.urls || []).filter(isMainLandingImageUrl);
     } catch {
       pool = [];
     }
+  }
+  if (!pool.length && config.designId === "demolition-v1") {
+    pool = defaultDemolitionImageUrls();
   }
   const seed = resolveVariationSeed(config, siteName);
   const rand = mulberry32(hashSeed(`img|${seed}`));

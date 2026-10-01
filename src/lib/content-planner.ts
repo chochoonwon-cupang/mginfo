@@ -8,6 +8,8 @@ import { PLANNER_PROMPT_VERSION } from "./quality-codes";
 import { readGeminiTokenUsage } from "./gemini-usage";
 import type { TokenUsage } from "./page-plan-types";
 import { uid } from "./slug";
+import type { VerifiedContextMeta } from "./verified-availability";
+import { formatVerifiedContextForPlanner } from "./verified-availability";
 
 
 function extractJson(text: string): string {
@@ -72,12 +74,16 @@ export function buildPlannerPrompt(input: {
   hasVerifiedAnimals?: boolean;
   regionalFacts?: RegionalFacts;
   availableVerifiedBlocks?: string[];
+  verifiedContext?: VerifiedContextMeta;
 }): string {
   const industry = input.pool.industry;
   const blueprint = input.pool.blueprint;
   const place = extractPlaceName(input.keyword) || "";
   const angleDist = summarizeAngleDistribution(input.related);
   const availableVerified = (input.availableVerifiedBlocks || []).join(", ") || "(없음 — verified/code 블록 사용 불가)";
+  const verifiedMeta = input.verifiedContext
+    ? formatVerifiedContextForPlanner(input.verifiedContext)
+    : "(메타 없음)";
 
   return `당신은 매거진 페이지의 Planner다. 글을 쓰지 말고 PagePlan JSON만 만든다.
 
@@ -99,11 +105,20 @@ export function buildPlannerPrompt(input: {
 아래 availableVerifiedBlocks만 실제 DB/코드로 렌더 가능하다.
 목록에 없는 verified/code 블록을 sections에 넣지 마라 (넣어도 서버가 제거한다).
 availableVerifiedBlocks: ${availableVerified}
-이 블록들(available_animals, store_information, visit_information, project_examples, company_information, consultation)은
-Gemini가 내용을 쓰지 않고 코드가 HTML을 만든다. heading·purpose만 계획하라.
+verifiedContext (match 메타 — 개인정보/전체 DB 아님):
+${verifiedMeta}
+목록에 있는 verified/code 블록만 heading·purpose를 계획하라. Gemini가 본문을 쓰지 않고 코드가 HTML을 만든다.
+(업종별로 availableVerifiedBlocks 내용이 다르다. 다른 업종 블록 이름을 예시로 끌어오지 마라.)
+
+【Verified heading grounding — 필수】
+- project_examples / available_animals heading은 Verified 데이터의 실제 match 범위를 넘지 마라.
+- match=exact 일 때만 "○○ 지역 ○○ 실제 사례"처럼 지역·유형을 단정하는 heading 가능.
+- match=type|region 이거나 safeHeading이 있으면 그 범위를 지켜라. 예: "확인 가능한 상가 철거 사례".
+- 해당 지역 사례가 없는데 "송파 상가 철거 실제 사례"처럼 쓰지 마라.
+- 서버가 heading을 교정할 수 있으나, Planner가 처음부터 과대 heading을 만들지 마라.
 
 【Angle 선택】
-keyword, industry, blueprint, 키워드 sub-topic, 최근 angle 분포, H2, verified 존재 여부.
+keyword, industry, blueprint, 키워드 sub-topic, 최근 angle 분포, H2, verified 존재·match 여부.
 지역→페르소나로 angle 고르지 마라. 단순 랜덤 금지.
 
 업종: ${industry?.name || ""} (${industry?.id || ""})
@@ -113,7 +128,7 @@ Blueprint: ${blueprint.key} v${blueprint.version} — ${blueprint.description}
 지리적 범위: ${place || "(없음)"}
 업체명(참고): ${input.vendorName || "(없음)"}
 Verified vendor facts: ${input.hasVerifiedVendor ? "일부 있음" : "없음"}
-Verified animals/cases: ${input.hasVerifiedAnimals ? "있음" : "없음"}
+Verified inventory (animals 또는 project cases): ${input.hasVerifiedAnimals ? "있음" : "없음"}
 
 Regional facts:
 ${formatRegionalFacts(input.regionalFacts)}
@@ -134,16 +149,18 @@ ${formatRelated(input.related)}
 
 규칙:
 1. searchIntent / contentStrategy / topicContext / angleReason / section.purpose 필수.
-2. topicContext.subTopics는 키워드·facts에 있는 것만.
-3. heading에 근거 없는 지역 특성 금지.
+2. topicContext.subTopics는 키워드·facts에 있는 것만. 키워드에서 읽히는 region·service·projectType 정도만.
+3. heading·본문 계획에 근거 없는 지역 특성·고객 성향 추론 금지 (예: 강남=고가, 서초=고급).
 4. internalLinkHints는 의도만.
 5. availableVerifiedBlocks에 없는 verified 블록을 넣지 마라.
 6. 【정보량 — 얇은 페이지 방지】
-   Verified 블록만으로 끝내지 마라. Blueprint 풀에서 AI 정보 블록(verifiedDataRequired 아닌 active 블록)을
-   contentStrategy에 맞게 충분히 고른다. faq·verified를 제외하고 AI 섹션을 최소 3개 이상 권장.
-   예(강제 고정 목차 아님): breed_intro, temperament|appearance, grooming, adoption_checklist + available_animals + store + visit + faq.
-   목표: 글자수 채우기가 아니라 분양·의뢰 전 판단에 필요한 정보량.
-7. available_animals가 있으면 contentAngle을 real_animal로 두는 것을 우선 검토하되, 최근 angle 분포와 중복을 피하라.
+   Verified 블록만으로 끝내지 마라. 위 Content Blocks 목록에서 AI 정보 블록(verifiedDataRequired 아닌 active)을
+   contentStrategy에 맞게 고른다. faq·verified를 제외하고 AI 섹션을 최소 3개 이상 권장.
+   고정 목차 금지. 다른 업종(분양/견종 등) 블록 이름을 끌어와 예시를 만들지 마라.
+   목표: 글자수 채우기가 아니라 의뢰·상담 전 판단에 필요한 정보량.
+7. availableVerifiedBlocks에 project_examples가 있으면 real_case_focused 등 사례 앵글을,
+   available_animals가 있으면 real_animal 앵글을 우선 검토하되 최근 angle 분포 중복을 피하라.
+   match가 exact가 아니면 "해당 지역 실제 사례" 중심 앵글/heading을 피하라.
 8. JSON만 출력.
 
 형식:
@@ -182,6 +199,7 @@ export async function callPlanner(input: {
   hasVerifiedAnimals?: boolean;
   regionalFacts?: RegionalFacts;
   availableVerifiedBlocks?: string[];
+  verifiedContext?: VerifiedContextMeta;
 }): Promise<{ plan: PagePlan; rawText: string; calls: number; tokens?: TokenUsage; promptVersion: string }> {
   const { GoogleGenerativeAI } = await import("@google/generative-ai");
   const genAI = new GoogleGenerativeAI(input.apiKey);

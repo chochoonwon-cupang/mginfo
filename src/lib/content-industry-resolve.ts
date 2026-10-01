@@ -1,30 +1,95 @@
-import type { ContentBlueprintStore } from "./content-blueprint-types";
+import type { ContentBlueprintStore, Industry } from "./content-blueprint-types";
 import { resolveBlueprintPool } from "./content-blueprint-store";
 import type { BulkGroup } from "./types";
 
-const DOG_HINT =
-  /분양|강아지|반려견|애견|포메|푸들|말티|비숑|코커|시바|리트리버|허스키|치와와|요크|닥스|진도|웰시|골든|래브라도|스피츠|사모예드|보더콜리|프렌치|불독|시츄|페키|슈나|믹스견|반려견분양/;
-const DEMO_HINT = /철거|해체|원상복구|폐기물처리|인테리어철거|상가철거|주택철거/;
-
 export type ResolvedBlueprint = NonNullable<ReturnType<typeof resolveBlueprintPool>>;
 
+/** Deterministic confidence — not an AI probability. */
+export type ResolverConfidence = "exact" | "strong" | "weak" | "unresolved";
+
 export type IndustryResolveResult =
-  | { ok: true; industryId: string; blueprintId: string; pool: ResolvedBlueprint; reason: string }
-  | { ok: false; reason: string };
+  | {
+      ok: true;
+      industryId: string;
+      blueprintId: string;
+      pool: ResolvedBlueprint;
+      reason: string;
+      confidence: ResolverConfidence;
+      matchedSignals: string[];
+    }
+  | {
+      ok: false;
+      reason: string;
+      confidence: "unresolved";
+      matchedSignals: string[];
+    };
+
+type ScoredIndustry = {
+  industry: Industry;
+  score: number;
+  signals: string[];
+  confidence: ResolverConfidence;
+};
+
+function scoreIndustryAgainstKeyword(industry: Industry, keyword: string): ScoredIndustry | null {
+  const hints = industry.resolverHints;
+  if (!hints) return null;
+  const kw = String(keyword || "").trim();
+  if (!kw) return null;
+
+  const negatives = hints.negativeTerms || [];
+  for (const neg of negatives) {
+    if (neg && kw.includes(neg)) {
+      return null;
+    }
+  }
+
+  const signals: string[] = [];
+  let score = 0;
+
+  for (const term of hints.serviceTerms || []) {
+    if (term && kw.includes(term)) {
+      score += 40;
+      signals.push(`serviceTerm:${term}`);
+    }
+  }
+  for (const term of hints.keywords || []) {
+    if (term && kw.includes(term)) {
+      score += 20;
+      signals.push(`keyword:${term}`);
+    }
+  }
+  for (const term of hints.aliases || []) {
+    if (term && kw.includes(term)) {
+      score += 15;
+      signals.push(`alias:${term}`);
+    }
+  }
+
+  if (score <= 0) return null;
+
+  let confidence: ResolverConfidence = "weak";
+  if (score >= 40 && signals.some((s) => s.startsWith("serviceTerm:"))) confidence = "exact";
+  else if (score >= 30) confidence = "strong";
+  else confidence = "weak";
+
+  return { industry, score, signals, confidence };
+}
 
 /**
- * Resolve industry/blueprint for bulk.
- * Prefer explicit BulkGroup fields; else keyword heuristics against active hub blueprints.
+ * Generic deterministic industry matcher driven by Industry.resolverHints data.
+ * No Gemini. Prefer explicit blueprint/industry/vendor profile signals.
  */
 export function resolveIndustryForBulk(
   store: ContentBlueprintStore,
   keyword: string,
   group: BulkGroup,
-  opts?: { siteId?: string; vendorId?: string }
+  opts?: { siteId?: string; vendorId?: string; vendorIndustryId?: string }
 ): IndustryResolveResult {
   const kw = String(keyword || "").trim();
   const explicitBlueprintId = String(group.blueprintId || "").trim();
   const explicitIndustryId = String(group.industryId || "").trim();
+  const vendorIndustryId = String(opts?.vendorIndustryId || "").trim();
 
   if (explicitBlueprintId) {
     const pool = resolveBlueprintPool(store, explicitBlueprintId, {
@@ -32,10 +97,20 @@ export function resolveIndustryForBulk(
       vendorId: opts?.vendorId || group.vendorId,
     });
     if (!pool?.blueprint || pool.blueprint.status === "disabled") {
-      return { ok: false, reason: `지정 Blueprint를 쓸 수 없습니다: ${explicitBlueprintId}` };
+      return {
+        ok: false,
+        reason: `지정 Blueprint를 쓸 수 없습니다: ${explicitBlueprintId}`,
+        confidence: "unresolved",
+        matchedSignals: [],
+      };
     }
     if (pool.blueprint.status !== "active") {
-      return { ok: false, reason: `Blueprint가 active가 아닙니다: ${explicitBlueprintId}` };
+      return {
+        ok: false,
+        reason: `Blueprint가 active가 아닙니다: ${explicitBlueprintId}`,
+        confidence: "unresolved",
+        matchedSignals: [],
+      };
     }
     return {
       ok: true,
@@ -43,44 +118,116 @@ export function resolveIndustryForBulk(
       blueprintId: pool.blueprint.id,
       pool,
       reason: "bulk_group.blueprintId",
+      confidence: "exact",
+      matchedSignals: [`blueprintId:${explicitBlueprintId}`],
     };
   }
 
   let industryId = explicitIndustryId;
-  if (!industryId) {
-    if (DEMO_HINT.test(kw)) industryId = "ind-demolition";
-    else if (DOG_HINT.test(kw)) industryId = "ind-dog-adoption";
+  let confidence: ResolverConfidence = explicitIndustryId ? "exact" : "unresolved";
+  let matchedSignals: string[] = explicitIndustryId ? [`bulk_group.industryId:${explicitIndustryId}`] : [];
+  let reason = explicitIndustryId ? "bulk_group.industryId" : "";
+
+  if (!industryId && vendorIndustryId) {
+    industryId = vendorIndustryId;
+    confidence = "strong";
+    matchedSignals = [`vendorProfile.industryId:${vendorIndustryId}`];
+    reason = "vendorProfile.industryId";
   }
+
   if (!industryId) {
-    return { ok: false, reason: "키워드에서 업종을 찾지 못함 → legacy" };
+    const scored = store.industries
+      .filter((row) => row.status === "active")
+      .map((ind) => scoreIndustryAgainstKeyword(ind, kw))
+      .filter(Boolean) as ScoredIndustry[];
+    scored.sort((a, b) => b.score - a.score);
+
+    if (!scored.length) {
+      return {
+        ok: false,
+        reason: "업종 unresolved — 키워드 힌트 없음",
+        confidence: "unresolved",
+        matchedSignals: [],
+      };
+    }
+
+    const best = scored[0];
+    const second = scored[1];
+    // Ambiguous: two industries close in score → unresolved rather than force
+    if (second && best.score - second.score < 15 && best.confidence !== "exact") {
+      return {
+        ok: false,
+        reason: `업종 ambiguous — ${best.industry.id} vs ${second.industry.id}`,
+        confidence: "unresolved",
+        matchedSignals: [...best.signals, ...second.signals],
+      };
+    }
+    // Weak-only match without serviceTerm → unresolved (don't force pet/demolition)
+    if (best.confidence === "weak") {
+      return {
+        ok: false,
+        reason: `업종 weak match only (${best.industry.id}) — unresolved`,
+        confidence: "unresolved",
+        matchedSignals: best.signals,
+      };
+    }
+
+    industryId = best.industry.id;
+    confidence = best.confidence;
+    matchedSignals = best.signals;
+    reason = "resolverHints";
   }
 
   const industry = store.industries.find((row) => row.id === industryId && row.status === "active");
   if (!industry) {
-    return { ok: false, reason: `업종이 active가 아닙니다: ${industryId}` };
+    return {
+      ok: false,
+      reason: `업종이 active가 아닙니다: ${industryId}`,
+      confidence: "unresolved",
+      matchedSignals,
+    };
   }
 
   const blueprint =
     store.blueprints.find((row) => row.industryId === industryId && row.status === "active") ||
     store.blueprints.find((row) => row.industryId === industryId);
   if (!blueprint || blueprint.status === "disabled") {
-    return { ok: false, reason: `업종에 사용 가능한 Blueprint 없음: ${industryId}` };
+    return {
+      ok: false,
+      reason: `업종에 사용 가능한 Blueprint 없음: ${industryId}`,
+      confidence: "unresolved",
+      matchedSignals,
+    };
   }
   if (blueprint.status !== "active") {
-    return { ok: false, reason: `Blueprint가 active가 아닙니다: ${blueprint.id}` };
+    return {
+      ok: false,
+      reason: `Blueprint가 active가 아닙니다: ${blueprint.id}`,
+      confidence: "unresolved",
+      matchedSignals,
+    };
   }
 
   const pool = resolveBlueprintPool(store, blueprint.id, {
     siteId: opts?.siteId,
     vendorId: opts?.vendorId || group.vendorId,
   });
-  if (!pool) return { ok: false, reason: "Blueprint resolve 실패" };
+  if (!pool) {
+    return {
+      ok: false,
+      reason: "Blueprint resolve 실패",
+      confidence: "unresolved",
+      matchedSignals,
+    };
+  }
 
   return {
     ok: true,
     industryId,
     blueprintId: blueprint.id,
     pool,
-    reason: explicitIndustryId ? "bulk_group.industryId" : "keyword_heuristic",
+    reason,
+    confidence,
+    matchedSignals,
   };
 }

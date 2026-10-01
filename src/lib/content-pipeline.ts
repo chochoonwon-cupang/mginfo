@@ -32,6 +32,12 @@ import type { GenerationLog, GenerationMode, PagePlan, TokenUsage, WriterResult 
 import type { AdVendor, BulkGroup, BulkKeyword, CategorySlug, Post, Store } from "./types";
 import { PIPELINE_VERSION, PLANNER_PROMPT_VERSION, WRITER_PROMPT_VERSION, QUALITY_CODES } from "./quality-codes";
 import { mergeTokenUsage } from "./gemini-usage";
+import { decidePublishGate } from "./publish-gate";
+import {
+  findReferenceEntitiesForKeyword,
+  formatReferenceFactsForPrompt,
+  getReferenceStore,
+} from "./reference-store";
 
 export type PipelineArticle = GenerateResult & {
   generationMode: GenerationMode;
@@ -160,6 +166,80 @@ async function writeOnce(input: Parameters<typeof callWriter>[0]): Promise<{
   }
 }
 
+/**
+ * Shared V1 Production Engine entry for Bulk / Hub Board / Editor.
+ * Builds a synthetic BulkGroup and delegates to generateBulkArticle.
+ */
+export async function generatePipelineArticle(input: {
+  store: Store;
+  keyword: string;
+  category: CategorySlug;
+  categoryName?: string;
+  categoryNotes?: string;
+  writingStyle?: string;
+  extraPrompt?: string;
+  vendorName?: string;
+  vendorPhone?: string;
+  vendorWebsite?: string;
+  vendorKakao?: string;
+  vendorPlaceUrl?: string;
+  vendorId?: string;
+  vendorIds?: string[];
+  industryId?: string;
+  blueprintId?: string;
+  vendor?: AdVendor | null;
+  apiKey: string;
+  siteId?: string;
+  pilotMode?: boolean;
+  pilotAllowedIndustryIds?: string[];
+}): Promise<PipelineArticle> {
+  const keyword = String(input.keyword || "").trim();
+  if (!keyword) {
+    throw new Error("키워드가 필요합니다.");
+  }
+  const vendorId =
+    String(input.vendorId || input.vendor?.id || "").trim() || undefined;
+  const group: BulkGroup = {
+    id: `pipeline-${Date.now()}`,
+    category: input.category,
+    dailyLimit: 0,
+    vendorName: input.vendorName || input.vendor?.name || "",
+    vendorPhone: input.vendorPhone || input.vendor?.phone || "",
+    vendorWebsite: input.vendorWebsite || input.vendor?.website || "",
+    vendorKakao: input.vendorKakao || input.vendor?.kakao || "",
+    vendorPlaceUrl: input.vendorPlaceUrl || "",
+    vendorId,
+    vendorIds: input.vendorIds?.length
+      ? input.vendorIds
+      : vendorId
+        ? [vendorId]
+        : [],
+    writingStyle: input.writingStyle || "random",
+    extraPrompt: input.extraPrompt || "",
+    industryId: input.industryId,
+    blueprintId: input.blueprintId,
+    keywords: [],
+  };
+  const item: BulkKeyword = {
+    id: `kw-${Date.now()}`,
+    keyword,
+    status: "queued",
+  };
+  return generateBulkArticle({
+    store: input.store,
+    group,
+    item,
+    category: input.category,
+    categoryName: input.categoryName,
+    categoryNotes: input.categoryNotes,
+    vendor: input.vendor ?? null,
+    apiKey: input.apiKey,
+    siteId: input.siteId,
+    pilotMode: input.pilotMode,
+    pilotAllowedIndustryIds: input.pilotAllowedIndustryIds,
+  });
+}
+
 export async function generateBulkArticle(input: {
   store: Store;
   group: BulkGroup;
@@ -170,6 +250,9 @@ export async function generateBulkArticle(input: {
   vendor?: AdVendor | null;
   apiKey: string;
   siteId?: string;
+  /** PHASE 9 — skip unresolved/non-allowed industries instead of legacy. */
+  pilotMode?: boolean;
+  pilotAllowedIndustryIds?: string[];
 }): Promise<PipelineArticle> {
   const keyword = input.item.keyword;
   const log = emptyLog(keyword, "planner_writer_v1");
@@ -188,12 +271,40 @@ export async function generateBulkArticle(input: {
     });
   }
 
+  const profileStore = await getVendorProfileStore();
+  const profile =
+    (input.vendor?.id && profileStore.profiles.find((p) => p.vendorId === input.vendor!.id)) ||
+    (input.group.vendorId && profileStore.profiles.find((p) => p.vendorId === input.group.vendorId)) ||
+    null;
+
   const resolved = resolveIndustryForBulk(blueprintStore, keyword, input.group, {
     siteId: input.siteId,
     vendorId: input.group.vendorId,
+    vendorIndustryId: profile?.industryId,
   });
 
   if (!resolved.ok) {
+    log.resolverConfidence = resolved.confidence;
+    log.resolverSignals = resolved.matchedSignals;
+    if (input.pilotMode) {
+      log.generationMode = "held";
+      log.publishDecision = "HOLD";
+      log.failureCategory = "QUALITY_FAILURE";
+      log.fallbackReason = `INDUSTRY_UNRESOLVED: ${resolved.reason}`;
+      log.errors.push(log.fallbackReason);
+      log.finishedAt = nowIso();
+      return {
+        title: keyword,
+        excerpt: "",
+        bodyHtml: "",
+        tags: [keyword],
+        faqItems: [],
+        generationMode: "held",
+        generationVersion: "held",
+        generationLog: log,
+      };
+    }
+    // unresolved / no industry → intentional legacy path (not quality FAIL)
     return runLegacyGenerate({
       ...input,
       mode: "legacy",
@@ -203,15 +314,37 @@ export async function generateBulkArticle(input: {
     });
   }
 
+  if (
+    input.pilotMode &&
+    Array.isArray(input.pilotAllowedIndustryIds) &&
+    input.pilotAllowedIndustryIds.length > 0 &&
+    !input.pilotAllowedIndustryIds.includes(resolved.industryId)
+  ) {
+    log.generationMode = "held";
+    log.publishDecision = "HOLD";
+    log.failureCategory = "QUALITY_FAILURE";
+    log.industryId = resolved.industryId;
+    log.fallbackReason = `INDUSTRY_NOT_ALLOWED: Pilot 허용 업종 아님 (${resolved.industryId})`;
+    log.errors.push(log.fallbackReason);
+    log.finishedAt = nowIso();
+    return {
+      title: keyword,
+      excerpt: "",
+      bodyHtml: "",
+      tags: [keyword],
+      faqItems: [],
+      generationMode: "held",
+      generationVersion: "held",
+      generationLog: log,
+      industryId: resolved.industryId,
+    };
+  }
+
   log.industryId = resolved.industryId;
   log.blueprintId = resolved.blueprintId;
   log.blueprintVersion = resolved.pool.blueprint.version;
-
-  const profileStore = await getVendorProfileStore();
-  const profile =
-    (input.vendor?.id && profileStore.profiles.find((p) => p.vendorId === input.vendor!.id)) ||
-    (input.group.vendorId && profileStore.profiles.find((p) => p.vendorId === input.group.vendorId)) ||
-    null;
+  log.resolverConfidence = resolved.confidence;
+  log.resolverSignals = resolved.matchedSignals;
 
   const verifiedPack = computeVerifiedAvailability({
     blocks: resolved.pool.blocks,
@@ -222,6 +355,10 @@ export async function generateBulkArticle(input: {
   });
 
   log.verifiedBlocksAvailable = verifiedPack.availableVerifiedBlocks;
+  log.verifiedContextSummary = verifiedPack.verifiedContext.blocks
+    .filter((b) => b.available)
+    .map((b) => `${b.blockKey}:${b.matchType || "n/a"}:${b.itemCount}`)
+    .join("|");
 
   const verified: VerifiedContext = {
     ...buildVerifiedContext(input.group, input.vendor),
@@ -238,6 +375,19 @@ export async function generateBulkArticle(input: {
     animals: verifiedPack.matchingAnimals.length ? verifiedPack.matchingAnimals : undefined,
     projectCases: verifiedPack.projects.length ? verifiedPack.projects : undefined,
   };
+
+  let referenceFacts: ReturnType<typeof formatReferenceFactsForPrompt> = [];
+  let referenceEntityIds: string[] = [];
+  try {
+    const refStore = await getReferenceStore();
+    const entities = findReferenceEntitiesForKeyword(refStore, keyword, resolved.industryId);
+    referenceFacts = formatReferenceFactsForPrompt(entities);
+    referenceEntityIds = [...new Set(referenceFacts.map((f) => f.entityId))];
+  } catch {
+    referenceFacts = [];
+    referenceEntityIds = [];
+  }
+  log.referenceEntityIds = referenceEntityIds;
 
   const related = collectRelatedPostSummaries(input.store.posts, keyword, resolved.industryId, 8);
   const writingStyle = resolveArticleStyle(input.group.writingStyle || "random", keyword);
@@ -259,6 +409,7 @@ export async function generateBulkArticle(input: {
       hasVerifiedAnimals: Boolean(verified.animals || verified.projectCases),
       regionalFacts: { region: extractPlaceName(keyword) || "", facts: [] },
       availableVerifiedBlocks: verifiedPack.availableVerifiedBlocks,
+      verifiedContext: verifiedPack.verifiedContext,
     });
     plan = planned.plan;
     log.plannerCalls = planned.calls;
@@ -271,6 +422,8 @@ export async function generateBulkArticle(input: {
     log.errors.push(reason);
     log.failureCodes = [QUALITY_CODES.PLAN_SCHEMA_INVALID];
     log.fallbackCode = QUALITY_CODES.PLAN_SCHEMA_INVALID;
+    log.failureCategory = "TECHNICAL_FAILURE";
+    log.publishDecision = "HOLD";
     log.finishedAt = nowIso();
     return runLegacyGenerate({
       ...input,
@@ -292,30 +445,54 @@ export async function generateBulkArticle(input: {
   plan = filtered.plan;
 
   if (plan.sections.length < 4) {
-    const reason = `Verified 필터 후 sections ${plan.sections.length}개 — Planner 경로 중단`;
+    const reason = `Verified 필터 후 sections ${plan.sections.length}개 — HOLD`;
     log.errors.push(reason);
+    log.failureCodes = ["SECTIONS_COLLAPSED_VERIFIED"];
+    log.failureCategory = "VERIFIED_DATA_FAILURE";
+    log.publishDecision = "HOLD";
     log.finishedAt = nowIso();
-    return runLegacyGenerate({
-      ...input,
-      mode: "legacy_fallback",
-      fallbackReason: reason,
-      logBase: log,
-      withUniqueness: false,
-    });
+    return {
+      title: plan.titleHint || keyword,
+      excerpt: "",
+      bodyHtml: "",
+      tags: [keyword],
+      generationMode: "held",
+      generationVersion: "held",
+      generationLog: log,
+      industryId: resolved.industryId,
+      blueprintId: resolved.blueprintId,
+      blueprintVersion: resolved.pool.blueprint.version,
+      pageType: plan.pageType,
+      contentAngle: plan.contentAngle,
+      pagePlanId: plan.planId,
+      pagePlan: plan,
+    };
   }
 
   const writerPlan = planForWriter(plan);
   if (writerPlan.sections.length < 2) {
-    const reason = `AI 작성 sections가 ${writerPlan.sections.length}개뿐임`;
+    const reason = `AI 작성 sections가 ${writerPlan.sections.length}개뿐임 — HOLD`;
     log.errors.push(reason);
+    log.failureCodes = ["SECTIONS_COLLAPSED_VERIFIED"];
+    log.failureCategory = "VERIFIED_DATA_FAILURE";
+    log.publishDecision = "HOLD";
     log.finishedAt = nowIso();
-    return runLegacyGenerate({
-      ...input,
-      mode: "legacy_fallback",
-      fallbackReason: reason,
-      logBase: log,
-      withUniqueness: false,
-    });
+    return {
+      title: plan.titleHint || keyword,
+      excerpt: "",
+      bodyHtml: "",
+      tags: [keyword],
+      generationMode: "held",
+      generationVersion: "held",
+      generationLog: log,
+      industryId: resolved.industryId,
+      blueprintId: resolved.blueprintId,
+      blueprintVersion: resolved.pool.blueprint.version,
+      pageType: plan.pageType,
+      contentAngle: plan.contentAngle,
+      pagePlanId: plan.planId,
+      pagePlan: plan,
+    };
   }
 
   const upcomingVerifiedBlocks = plan.sections
@@ -334,6 +511,7 @@ export async function generateBulkArticle(input: {
     categoryName: input.categoryName,
     avoidTitles,
     upcomingVerifiedBlocks,
+    referenceFacts,
   };
 
   let written = await writeOnce(writerInput);
@@ -447,7 +625,8 @@ export async function generateBulkArticle(input: {
     log.failureCodes = validation.checks.filter((c) => c.severity === "FAIL").map((c) => c.code);
   }
 
-  // FAIL → legacy fallback. WARN → publish with log (no extra Gemini).
+  // PHASE 7: QUALITY/VERIFIED FAIL → HOLD (no legacy_fallback content publish).
+  // TECHNICAL still used legacy_fallback earlier in the pipeline.
   if (!validation.ok) {
     const reason = validation.issues
       .filter((i) => i.severity === "error")
@@ -455,15 +634,52 @@ export async function generateBulkArticle(input: {
       .join("; ");
     log.errors.push(reason);
     log.fallbackCode = log.failureCodes?.[0];
-    log.finishedAt = nowIso();
-    return runLegacyGenerate({
-      ...input,
-      mode: "legacy_fallback",
-      fallbackReason: `Validation 실패: ${reason}`,
-      logBase: log,
-      withUniqueness: false,
+    const gate = decidePublishGate({
+      validationOk: false,
+      hasFail: true,
+      hasWarn: validation.hasWarn,
+      failureCodes: log.failureCodes,
     });
+    log.publishDecision = gate.decision;
+    log.failureCategory = gate.category;
+    log.finishedAt = nowIso();
+
+    if (gate.allowLegacyFallback) {
+      return runLegacyGenerate({
+        ...input,
+        mode: "legacy_fallback",
+        fallbackReason: `Validation 실패(technical): ${reason}`,
+        logBase: log,
+        withUniqueness: false,
+      });
+    }
+
+    return {
+      title: validation.fixed.title || plan.titleHint || keyword,
+      excerpt: validation.fixed.excerpt || "",
+      bodyHtml,
+      tags: [keyword],
+      faqItems: validation.fixed.faqItems,
+      generationMode: "held",
+      generationVersion: "held",
+      generationLog: log,
+      industryId: resolved.industryId,
+      blueprintId: resolved.blueprintId,
+      blueprintVersion: resolved.pool.blueprint.version,
+      pageType: plan.pageType,
+      contentAngle: plan.contentAngle,
+      pagePlanId: plan.planId,
+      pagePlan: plan,
+    };
   }
+
+  const gatePass = decidePublishGate({
+    validationOk: true,
+    hasFail: false,
+    hasWarn: validation.hasWarn,
+    failureCodes: [],
+  });
+  log.publishDecision = gatePass.decision;
 
   let title = validation.fixed.title;
   if (findSimilarTitle(title, avoidTitles)) {

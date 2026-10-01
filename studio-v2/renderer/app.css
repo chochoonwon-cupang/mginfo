@@ -83,6 +83,21 @@ label {
   color: var(--muted);
   font-size: 12px;
 }
+label.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 16px 0 8px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+label.check-row input {
+  width: auto;
+  margin-top: 3px;
+  flex-shrink: 0;
+}
 input,
 textarea,
 select {
@@ -127,6 +142,46 @@ select {
   color: var(--accent-ink);
   border-color: transparent;
   font-weight: 700;
+}
+.btn.sm {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+.btn.danger {
+  border-color: rgba(240, 120, 120, 0.35);
+  color: #f0a0a0;
+}
+.vendor-groups-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+.vendor-groups-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 10px 0 4px;
+}
+.vendor-group-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 14px 10px;
+  background: rgba(0, 0, 0, 0.15);
+}
+.vendor-group-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.vendor-group-card .vg-field {
+  margin-bottom: 8px;
+}
+.vendor-group-card .vg-field label {
+  margin: 0 0 4px;
+  font-size: 11px;
 }
 .table {
   width: 100%;

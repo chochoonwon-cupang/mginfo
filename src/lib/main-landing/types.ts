@@ -1,4 +1,4 @@
-export const MAIN_DESIGN_IDS = ["scalp-tattoo-v1"] as const;
+export const MAIN_DESIGN_IDS = ["scalp-tattoo-v1", "demolition-v1"] as const;
 export type MainDesignId = (typeof MAIN_DESIGN_IDS)[number];
 
 export const LEGACY_MAIN_DESIGN_MAP: Record<string, MainDesignId> = {
@@ -38,6 +38,15 @@ export type MainLandingStep = { title: string; body: string };
 export type MainLandingService = { title: string; body: string; tag?: string };
 export type MainLandingDirectorGroup = { title: string; items: string[] };
 export type MainLandingReview = { quote: string; name: string; course: string };
+export type MainLandingStat = { value: string; label: string };
+export type MainLandingGalleryCase = { title: string; tag: string };
+export type MainLandingGrantBlock = {
+  primary: string;
+  secondary: string;
+  headline: string;
+  body: string;
+  disclaimer: string;
+};
 
 /** Gemini「내용 보충」으로 채운 문장 오버라이드. 섹션 뼈대는 유지. */
 export type MainLandingCopyOverride = {
@@ -114,6 +123,18 @@ export type MainLandingSectionId =
   | "reviews"
   | "faq";
 
+/** demolition-v1 본문 섹션 순서 (히어로·푸터 제외) */
+export type DemolitionBlockId =
+  | "reviews"
+  | "about"
+  | "process"
+  | "gallery"
+  | "services"
+  | "grant"
+  | "trust"
+  | "cta"
+  | "faq";
+
 export type MainLandingTheme = {
   accent: string;
   teal: string;
@@ -168,6 +189,16 @@ export type MainLandingCopy = {
   /** @deprecated use theme.accent */
   accent: string;
   sectionOrder: MainLandingSectionId[];
+  /** demolition-v1 전용 */
+  grant?: MainLandingGrantBlock;
+  stats?: MainLandingStat[];
+  galleryCases?: MainLandingGalleryCase[];
+  trustTitle?: string;
+  trustBody?: string;
+  /** demolition-v1: 키워드 시드별 섹션 배치 */
+  demolitionBlockOrder?: DemolitionBlockId[];
+  /** demolition-v1: 0–2 레이아웃 톤 (카드/컴팩트 등) */
+  demolitionLayoutVariant?: number;
 };
 
 export function emptyMainLandingVendor(): MainLandingVendor {

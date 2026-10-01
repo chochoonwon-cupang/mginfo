@@ -1,26 +1,35 @@
 import type { MetadataRoute } from "next";
 import { getCategories, getPublishedPosts } from "@/lib/db";
+import { resolvePublicOrigin } from "@/lib/main-landing/resolve-origin";
 import { collectRegionHubs, regionHubPath } from "@/lib/region-hub";
-import { postUrl, SITE_ORIGIN } from "@/lib/seo";
 
 export const revalidate = 600;
 
+function originPostUrl(origin: string, slug: string) {
+  const safe = encodeURI(slug);
+  return `${origin}/posts/${safe}`;
+}
+
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const [posts, categories] = await Promise.all([getPublishedPosts(), getCategories()]);
+  const [posts, categories, origin] = await Promise.all([
+    getPublishedPosts(),
+    getCategories(),
+    resolvePublicOrigin(),
+  ]);
   const now = new Date();
 
   const staticPages: MetadataRoute.Sitemap = [
-    { url: `${SITE_ORIGIN}/`, lastModified: now, changeFrequency: "daily", priority: 1 },
-    { url: `${SITE_ORIGIN}/posts`, lastModified: now, changeFrequency: "daily", priority: 0.8 },
-    { url: `${SITE_ORIGIN}/partners`, lastModified: now, changeFrequency: "weekly", priority: 0.5 },
+    { url: `${origin}/`, lastModified: now, changeFrequency: "daily", priority: 1 },
+    { url: `${origin}/posts`, lastModified: now, changeFrequency: "daily", priority: 0.85 },
+    { url: `${origin}/partners`, lastModified: now, changeFrequency: "weekly", priority: 0.5 },
     ...categories.map((c) => ({
-      url: `${SITE_ORIGIN}/category/${c.slug}`,
+      url: `${origin}/category/${c.slug}`,
       lastModified: now,
       changeFrequency: "weekly" as const,
       priority: 0.7,
     })),
     ...collectRegionHubs(posts).map((hub) => ({
-      url: `${SITE_ORIGIN}${regionHubPath(hub.place)}`,
+      url: `${origin}${regionHubPath(hub.place)}`,
       lastModified: now,
       changeFrequency: "weekly" as const,
       priority: 0.65,
@@ -28,7 +37,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   ];
 
   const postPages: MetadataRoute.Sitemap = posts.map((post) => ({
-    url: postUrl(post.slug),
+    url: originPostUrl(origin, post.slug),
     lastModified: new Date(post.updatedAt || post.publishedAt || post.createdAt),
     changeFrequency: "weekly",
     priority: 0.9,

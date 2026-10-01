@@ -30,6 +30,11 @@ export function assembleHybridBodyHtml(input: {
   }
 
   for (const section of input.plan.sections) {
+    // FAQ is rendered once on the post page from faqItems (<details>), not duplicated in body.
+    if (section.blockKey === "faq") {
+      continue;
+    }
+
     if (isCodeRenderedBlock(section.blockKey)) {
       const inner = renderVerifiedBlockHtml(section.blockKey, section, input.pack);
       if (!inner) {

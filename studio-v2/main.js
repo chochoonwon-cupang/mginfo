@@ -2,16 +2,27 @@ const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { readDrafts, writeDrafts, uid, previewHost } = require("./lib/drafts");
-const { readSites, upsertSite } = require("./lib/ledger");
-const { provisionSite, applyBrandBootstrap, verifyToken, DEFAULT_REPO } = require("./lib/provision");
+const { readSites, upsertSite, clearSites } = require("./lib/ledger");
+const {
+  provisionSite,
+  applyBrandBootstrap,
+  verifyToken,
+  DEFAULT_REPO,
+  sharedProjectNameFromDomain,
+} = require("./lib/provision");
+const { DEFAULT_TEAM_ID, DEFAULT_OPS_HUB_URL, DEFAULT_SINGLE_PROJECT_PER_APEX } = require("./lib/defaults");
 const { resolveVendorAddress } = require("./lib/auto-address");
+const { generateSiteTagline, applySiteTagline } = require("./lib/site-tagline");
+const {
+  parseVendorGroupsText,
+  normalizeVendorGroupsFromStudio,
+  resolveVendorGroupsFromPayload,
+  applyVendorGroupToPayload,
+  syncVendorGroups,
+} = require("./lib/vendor-groups");
 
 function configPath() {
   return path.join(app.getPath("userData"), "brand-studio-config.json");
-}
-
-function studioConfigPath() {
-  return path.join(app.getPath("appData"), "infocs-studio", "studio-config.json");
 }
 
 const SITE_THEME_IDS = ["folio", "press", "night", "journal", "qna", "talk", "portal", "carrot", "studio"];
@@ -49,10 +60,11 @@ function parseNaverMetaMap(raw) {
 function defaultConfig() {
   return {
     token: "",
-    teamId: "",
+    teamId: DEFAULT_TEAM_ID,
     repo: DEFAULT_REPO,
-    opsHubUrl: "https://magazine.infocs.co.kr",
+    opsHubUrl: DEFAULT_OPS_HUB_URL,
     opsMasterPassword: "",
+    deploymentProtectionBypass: "",
     geminiApiKey: "",
     geminiModel: "",
   };
@@ -111,51 +123,8 @@ function resolveGeminiFields(payload, prev) {
   return { geminiApiKey, geminiModel, rescued };
 }
 
-function readStudioConfig() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(studioConfigPath(), "utf8"));
-    return {
-      token: String(raw?.token || "").trim(),
-      teamId: String(raw?.teamId || "").trim(),
-      repo: String(raw?.repo || "").trim() || DEFAULT_REPO,
-      opsHubUrl: String(raw?.opsHubUrl || "").trim() || "https://magazine.infocs.co.kr",
-      opsMasterPassword: String(raw?.opsMasterPassword || ""),
-      geminiApiKey: String(raw?.geminiApiKey || "").trim(),
-      geminiModel: String(raw?.geminiModel || "").trim(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function importFromStudio(overwriteToken = true) {
-  const fromStudio = readStudioConfig();
-  if (!fromStudio) {
-    throw new Error("기존 Infocs Studio 설정을 찾지 못했습니다. (AppData\\infocs-studio\\studio-config.json)");
-  }
-  const prev = readConfig();
-  const next = {
-    ...prev,
-    token: overwriteToken && fromStudio.token ? fromStudio.token : prev.token || fromStudio.token,
-    teamId: fromStudio.teamId || prev.teamId,
-    repo: fromStudio.repo || prev.repo || DEFAULT_REPO,
-    opsHubUrl: fromStudio.opsHubUrl || prev.opsHubUrl,
-    opsMasterPassword: fromStudio.opsMasterPassword || prev.opsMasterPassword,
-    geminiApiKey: prev.geminiApiKey || fromStudio.geminiApiKey || "",
-    geminiModel: prev.geminiModel || fromStudio.geminiModel || "",
-  };
-  writeConfig(next);
-  return next;
-}
-
 function ensureConfigHydrated() {
-  const cfg = readConfig();
-  if (cfg.token) return cfg;
-  try {
-    return importFromStudio(true);
-  } catch {
-    return cfg;
-  }
+  return readConfig();
 }
 
 function readConfig() {
@@ -222,28 +191,13 @@ ipcMain.handle("brand:load", async () => {
       ...cfg,
       token: maskSecret(cfg.token),
       geminiApiKey: maskSecret(cfg.geminiApiKey),
+      deploymentProtectionBypass: maskSecret(cfg.deploymentProtectionBypass),
       hasToken: Boolean(cfg.token),
       hasGeminiKey: Boolean(cfg.geminiApiKey),
-      importedFromStudio: Boolean(cfg.token && readStudioConfig()?.token),
-      studioConfigPath: studioConfigPath(),
+      hasDeploymentBypass: Boolean(cfg.deploymentProtectionBypass),
     },
     drafts: readDrafts(app.getPath("userData")),
     sites: readSites(app.getPath("userData")),
-  };
-});
-
-ipcMain.handle("brand:import-studio-settings", async () => {
-  const cfg = importFromStudio(true);
-  return {
-    ok: true,
-    config: {
-      ...cfg,
-      token: maskSecret(cfg.token),
-      geminiApiKey: maskSecret(cfg.geminiApiKey),
-      hasToken: Boolean(cfg.token),
-      hasGeminiKey: Boolean(cfg.geminiApiKey),
-      studioConfigPath: studioConfigPath(),
-    },
   };
 });
 
@@ -256,8 +210,13 @@ ipcMain.handle("brand:save-settings", async (_e, payload) => {
     token: !isKeepPreviousSecret(nextToken) ? nextToken : prev.token,
     teamId: String(payload?.teamId || "").trim(),
     repo: String(payload?.repo || "").trim() || DEFAULT_REPO,
-    opsHubUrl: String(payload?.opsHubUrl || "").trim() || "https://magazine.infocs.co.kr",
-    opsMasterPassword: String(payload?.opsMasterPassword || ""),
+    opsHubUrl: String(payload?.opsHubUrl || "").trim() || DEFAULT_OPS_HUB_URL,
+    opsMasterPassword: !isKeepPreviousSecret(String(payload?.opsMasterPassword ?? ""))
+      ? String(payload?.opsMasterPassword || "").trim()
+      : String(prev.opsMasterPassword || "").trim(),
+    deploymentProtectionBypass: !isKeepPreviousSecret(String(payload?.deploymentProtectionBypass ?? ""))
+      ? String(payload?.deploymentProtectionBypass || "").trim()
+      : String(prev.deploymentProtectionBypass || "").trim(),
     geminiApiKey: gemini.geminiApiKey,
     geminiModel: gemini.geminiModel,
   };
@@ -269,8 +228,10 @@ ipcMain.handle("brand:save-settings", async (_e, payload) => {
       ...cfg,
       token: maskSecret(cfg.token),
       geminiApiKey: maskSecret(cfg.geminiApiKey),
+      deploymentProtectionBypass: maskSecret(cfg.deploymentProtectionBypass),
       hasToken: Boolean(cfg.token),
       hasGeminiKey: Boolean(cfg.geminiApiKey),
+      hasDeploymentBypass: Boolean(cfg.deploymentProtectionBypass),
     },
   };
 });
@@ -301,6 +262,9 @@ ipcMain.handle("brand:save-draft", async (_e, payload) => {
     naverPassword: String(payload?.naverPassword || "").trim(),
     naverSiteVerification: String(payload?.naverSiteVerification || "").trim(),
     naverMetaMap: String(payload?.naverMetaMap || ""),
+    vendorGroupsText: String(payload?.vendorGroupsText || ""),
+    vendorGroups: normalizeVendorGroupsFromStudio(payload?.vendorGroups),
+    useGeminiEnrich: Boolean(payload?.useGeminiEnrich),
     mainLanding: payload?.mainLanding || {},
     seoTitleSuffix: String(payload?.seoTitleSuffix || payload?.mainLanding?.seoTitleSuffix || "").trim(),
     notes: String(payload?.notes || ""),
@@ -331,6 +295,13 @@ ipcMain.handle("brand:preview", async (_e, payload) => {
 
 ipcMain.handle("brand:publish-batch", async (event, payload) => {
   const cfg = ensureConfigHydrated();
+  let studioVersion = "0.0.0";
+  try {
+    studioVersion = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8")).version || studioVersion;
+  } catch {
+    /* ignore */
+  }
+  sendLog(event, `Infocs Brand Studio v${studioVersion}`);
   if (!cfg.token) throw new Error("계정 설정에서 Vercel 토큰을 저장하거나, 기존 스튜디오 설정을 가져오세요.");
   if (!String(cfg.opsMasterPassword || "").trim()) {
     throw new Error("계정 설정에 마스터 비밀번호를 저장하세요. 메인 디자인을 켠 상태로 사이트에 심을 때 필요합니다.");
@@ -357,7 +328,10 @@ ipcMain.handle("brand:publish-batch", async (event, payload) => {
   const naverDefault = String(payload?.naverSiteVerification || "").trim();
   const naverMap = parseNaverMetaMap(payload?.naverMetaMap);
 
+  const vendorGroups = resolveVendorGroupsFromPayload(payload);
+  const useGeminiEnrich = Boolean(payload?.useGeminiEnrich);
   const results = [];
+  let groupsSynced = false;
   for (let i = 0; i < keywords.length; i += 1) {
     const keyword = keywords[i];
     const { host, punycode } = previewHost(keyword, apex);
@@ -381,6 +355,25 @@ ipcMain.handle("brand:publish-batch", async (event, payload) => {
     }
     const variationSeed = `${keyword}|${businessName}|${apex}|${siteTheme}|${i}`;
     try {
+      sendLog(
+        event,
+        useGeminiEnrich
+          ? "제미나이로 검색용 소개 문구(메타 설명) 생성 중…"
+          : "문구 풀 + 키워드 조합으로 검색용 소개 문구 생성 중…"
+      );
+      const siteTagline = await generateSiteTagline({
+        keyword,
+        vendorName: businessName,
+        apiKey: useGeminiEnrich ? cfg.geminiApiKey : "",
+        model: cfg.geminiModel,
+        seed: `${variationSeed}|seo-tagline`,
+        useGemini: useGeminiEnrich,
+        designId,
+      });
+      sendLog(event, `소개 문구: ${siteTagline}`);
+
+      const sharedProjectName = sharedProjectNameFromDomain(domain);
+      const studioHttpOpts = { bypassSecret: cfg.deploymentProtectionBypass };
       const provisioned = await provisionSite(
         {
           token: cfg.token,
@@ -389,13 +382,22 @@ ipcMain.handle("brand:publish-batch", async (event, payload) => {
           domain,
           blogName: keyword,
           masterPassword: cfg.opsMasterPassword,
+          deploymentProtectionBypass: cfg.deploymentProtectionBypass,
           naverSiteVerification,
           geminiApiKey: cfg.geminiApiKey,
           geminiModel: cfg.geminiModel,
+          siteTagline,
+          singleProjectPerApex: DEFAULT_SINGLE_PROJECT_PER_APEX,
+          sharedProjectName,
           confirmExistingProject: async () => true,
+          deployProduction: i === 0,
         },
         (msg) => sendLog(event, msg)
       );
+
+      // 배포 직후 첫 요청이 빈 스토어를 심기 전에 부트스트랩이 이기도록 짧게 대기
+      sendLog(event, "사이트 응답 대기 후 메인 디자인을 적용합니다…");
+      await new Promise((r) => setTimeout(r, 8000));
 
       const mainLanding = {
         enabled: true,
@@ -407,9 +409,9 @@ ipcMain.handle("brand:publish-batch", async (event, payload) => {
           address,
           businessNumber: String(vendor.businessNumber || "").trim(),
           kakao: String(vendor.kakao || "").trim(),
-          industry: "두피문신",
+          industry: designId === "demolition-v1" ? "철거" : "두피문신",
           region: "",
-          intro: "",
+          intro: siteTagline,
           website: "",
           strengths: "",
         },
@@ -420,38 +422,95 @@ ipcMain.handle("brand:publish-batch", async (event, payload) => {
         variationSeed,
       };
 
-      if (!cfg.geminiApiKey) {
-        sendLog(event, "경고: 계정 설정에 Gemini API Key가 없습니다. 메인 내용은 기본 원고만 적용됩니다.");
+      if (useGeminiEnrich) {
+        if (!cfg.geminiApiKey) {
+          sendLog(event, "경고: 제미나이 체크됐으나 API Key 없음 — 메인 enrich는 서버에서 건너뜁니다.");
+        } else {
+          sendLog(event, "제미나이로 메인 문장 보충(enrich)을 요청합니다…");
+        }
       } else {
-        sendLog(event, "제미나이 키로 메인 내용 보충을 시도합니다…");
+        sendLog(event, "메인 내용: 템플릿·후기·소개 문구 풀을 키워드·시드로 조합합니다 (제미나이 미사용).");
       }
+      if (vendorGroups.length && !groupsSynced) {
+        await syncVendorGroups(
+          [provisioned.vercelHost, provisioned.siteUrl],
+          vendorGroups,
+          cfg.opsMasterPassword,
+          (msg) => sendLog(event, msg),
+          studioHttpOpts
+        );
+        groupsSynced = true;
+      }
+
+      const grouped = applyVendorGroupToPayload(keyword, mainLanding.vendor, vendorGroups);
+      if (grouped.groupId) {
+        mainLanding.vendor = grouped.vendor;
+        sendLog(event, `업체 그룹 적용: ${grouped.groupId} (${keyword})`);
+      }
+      mainLanding.vendor.address = resolveVendorAddress({
+        address: mainLanding.vendor.address,
+        keyword,
+        name: mainLanding.vendor.name || businessName,
+      });
+
+      const industry =
+        designId === "demolition-v1" ? "철거" : designId === "scalp-tattoo-v1" ? "두피문신" : "브랜드";
+      mainLanding.vendor.industry = industry;
+
       sendLog(event, "메인랜딩 ON · 블로그 테마 적용 중…");
+      const profileHost = provisioned.domain || provisioned.publicHost;
+      const hostCandidates = [profileHost, host].filter(
+        (h, i, arr) => h && arr.indexOf(h) === i
+      );
       const bootstrapped = await applyBrandBootstrap(
-        [provisioned.siteUrl, provisioned.vercelHost],
+        [provisioned.vercelHost, provisioned.siteUrl],
         {
+          host: profileHost,
+          domain: profileHost,
+          hostAliases: hostCandidates,
           siteName: keyword,
-          company: businessName,
+          siteTagline,
+          company: mainLanding.vendor.name || businessName,
           phone: mainLanding.vendor.phone,
-          address,
+          address: mainLanding.vendor.address || address,
           bizNo: mainLanding.vendor.businessNumber,
           siteTheme,
           mainLanding: { ...mainLanding, enabled: true },
-          enrich: true,
-          ...(cfg.geminiApiKey ? { geminiApiKey: cfg.geminiApiKey } : {}),
-          ...(cfg.geminiModel ? { geminiModel: cfg.geminiModel } : {}),
+          enrich: useGeminiEnrich,
+          ...(vendorGroups.length ? { vendorGroups } : {}),
+          ...(useGeminiEnrich && cfg.geminiApiKey ? { geminiApiKey: cfg.geminiApiKey } : {}),
+          ...(useGeminiEnrich && cfg.geminiModel ? { geminiModel: cfg.geminiModel } : {}),
           ...(naverSiteVerification ? { naverSiteVerification } : {}),
         },
         cfg.opsMasterPassword,
-        (msg) => sendLog(event, msg)
+        (msg) => sendLog(event, msg),
+        { ...studioHttpOpts, hostCandidates }
       );
       if (!bootstrapped) {
-        throw new Error("메인 디자인(ON) 적용에 실패했습니다. 마스터 비밀번호·배포 상태를 확인하세요.");
+        throw new Error(
+          "메인 디자인(ON) 적용에 실패했습니다. Vercel 배포 보호 우회 시크릿·MASTER_PASSWORD(마스터 비번)를 확인하세요."
+        );
       }
       sendLog(event, "메인 디자인이 켜진 상태로 적용되었습니다.");
+
+      // 기존 클론 코드에도 검색 소개가 확실히 들어가도록 설정 API로 한 번 더 반영
+      await applySiteTagline(
+        [provisioned.vercelHost, provisioned.siteUrl],
+        {
+          siteName: keyword,
+          siteTagline,
+          ...(cfg.geminiApiKey ? { geminiApiKey: cfg.geminiApiKey } : {}),
+          ...(cfg.geminiModel ? { geminiModel: cfg.geminiModel } : {}),
+        },
+        cfg.opsMasterPassword,
+        (msg) => sendLog(event, msg),
+        studioHttpOpts
+      );
 
       const sites = upsertSite(app.getPath("userData"), {
         keyword,
         siteName: keyword,
+        siteTagline,
         domain: provisioned.domain,
         apexDomain: apex,
         siteTheme,
@@ -477,6 +536,7 @@ ipcMain.handle("brand:publish-batch", async (event, payload) => {
         mainLandingEnabled: true,
         address,
         variationSeed,
+        siteTagline,
         ...provisioned,
         dns: provisioned.dns,
       });
@@ -492,6 +552,43 @@ ipcMain.handle("brand:publish-batch", async (event, payload) => {
     results,
     sites: readSites(app.getPath("userData")),
   };
+});
+
+ipcMain.handle("brand:clear-sites", async () => {
+  const sites = clearSites(app.getPath("userData"));
+  return { ok: true, sites };
+});
+
+ipcMain.handle("brand:parse-vendor-groups-text", async (_e, text) => parseVendorGroupsText(String(text || "")));
+
+ipcMain.handle("brand:apply-vendor-groups", async (_e, payload) => {
+  const cfg = ensureConfigHydrated();
+  if (!String(cfg.opsMasterPassword || "").trim()) {
+    throw new Error("마스터 비밀번호를 저장하세요.");
+  }
+  const groups = resolveVendorGroupsFromPayload(payload);
+  if (!groups.length) throw new Error("업체 그룹을 1개 이상 입력하세요.");
+  const sites = readSites(app.getPath("userData"));
+  const hub = String(cfg.opsHubUrl || "").replace(/\/$/, "");
+  const fromSite = sites.find((s) => s.siteUrl || s.vercelHost);
+  const { sortStudioApiBases, studioAuthHeaders, mergeHeaders } = require("./lib/http-client");
+  const bases = sortStudioApiBases([fromSite?.vercelHost, fromSite?.siteUrl, hub].filter(Boolean));
+  if (!bases.length) {
+    throw new Error("발행된 사이트 URL 또는 허브 URL이 필요합니다.");
+  }
+  const auth = studioAuthHeaders({
+    masterPassword: cfg.opsMasterPassword,
+    bypassSecret: cfg.deploymentProtectionBypass,
+  });
+  const res = await fetch(`${bases[0]}/api/brand-studio/vendor-groups`, {
+    method: "POST",
+    headers: mergeHeaders({ "Content-Type": "application/json" }, auth),
+    body: JSON.stringify({ vendorGroups: groups, apply: true }),
+    signal: AbortSignal.timeout(60000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return { ok: true, count: data.count || groups.length, hostsUpdated: data.hostsUpdated || 0 };
 });
 
 ipcMain.handle("brand:update-site", async (_e, payload) => {
@@ -526,14 +623,17 @@ ipcMain.handle("brand:update-site", async (_e, payload) => {
   let applied = false;
   if (cfg.opsMasterPassword && (current.siteUrl || current.vercelHost)) {
     applied = await applyBrandBootstrap(
-      [current.siteUrl, current.vercelHost],
+      [current.vercelHost, current.siteUrl],
       {
+        host: current.domain || current.publicHost,
+        domain: current.domain || current.publicHost,
         ...(address ? { address } : {}),
         ...(siteTheme ? { siteTheme } : {}),
         ...(naverSiteVerification ? { naverSiteVerification } : {}),
       },
       cfg.opsMasterPassword,
-      () => {}
+      () => {},
+      { bypassSecret: cfg.deploymentProtectionBypass }
     );
   }
 

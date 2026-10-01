@@ -42,10 +42,26 @@ function normalizeIndustry(raw: unknown): Industry | null {
     key,
     name,
     description: String(row.description || "").trim() || undefined,
+    resolverHints: normalizeResolverHints(row.resolverHints),
     status: asStatus(row.status, "active"),
     createdAt: String(row.createdAt || now),
     updatedAt: String(row.updatedAt || now),
   };
+}
+
+function normalizeResolverHints(raw: unknown): Industry["resolverHints"] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const row = raw as Record<string, unknown>;
+  const hints = {
+    keywords: asStringList(row.keywords),
+    aliases: asStringList(row.aliases),
+    serviceTerms: asStringList(row.serviceTerms),
+    negativeTerms: asStringList(row.negativeTerms),
+  };
+  if (!hints.keywords.length && !hints.aliases.length && !hints.serviceTerms.length && !hints.negativeTerms.length) {
+    return undefined;
+  }
+  return hints;
 }
 
 function normalizeBlock(raw: unknown): ContentBlock | null {
@@ -187,8 +203,17 @@ export function normalizeContentBlueprintStore(raw: unknown): ContentBlueprintSt
       updatedAt: new Date().toISOString(),
     };
   }
+  // PHASE 7: patch resolverHints from seed when remote store lacks them (no full reseed).
+  const seedHints = new Map(
+    seedContentBlueprintStore().industries.map((i) => [i.id, i.resolverHints] as const)
+  );
+  const patchedIndustries = (industries as Industry[]).map((ind) => {
+    if (ind.resolverHints) return ind;
+    const hints = seedHints.get(ind.id);
+    return hints ? { ...ind, resolverHints: hints } : ind;
+  });
   return {
-    industries: industries as Industry[],
+    industries: patchedIndustries,
     blueprints: blueprints as ContentBlueprint[],
     blocks: blocks as ContentBlock[],
     pageTypes: pageTypes as PageType[],
@@ -297,6 +322,519 @@ export async function setBlockStatus(blockId: string, status: CatalogStatus) {
   };
   const saved = await saveStore(next);
   return { ok: true as const, store: saved, block: saved.blocks[idx] };
+}
+
+function slugKey(raw: string, fallback = "block"): string {
+  const cleaned = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40);
+  return cleaned || fallback;
+}
+
+/** Create or update a content block for an industry. */
+export async function upsertBlock(input: {
+  id?: string;
+  industryId: string;
+  key: string;
+  name: string;
+  description?: string;
+  verifiedDataRequired?: boolean;
+  optional?: boolean;
+  status?: CatalogStatus;
+  allowedPageTypes?: string[];
+  /** If set, ensure this blueprint includes the block key. */
+  addToBlueprintId?: string;
+}) {
+  const store = await loadStore();
+  const industryId = String(input.industryId || "").trim();
+  if (!store.industries.some((row) => row.id === industryId)) {
+    return { ok: false as const, error: "업종을 찾을 수 없습니다." };
+  }
+  const key = slugKey(input.key || input.name, "block");
+  const name = String(input.name || "").trim();
+  if (!name) return { ok: false as const, error: "블록 이름이 필요합니다." };
+  const now = new Date().toISOString();
+  const id = String(input.id || "").trim() || `blk-${industryId.replace(/^ind-/, "")}-${key}`;
+  const existing = store.blocks.findIndex(
+    (row) => row.id === id || (row.industryId === industryId && row.key === key)
+  );
+
+  let nextBlocks = store.blocks;
+  let block: ContentBlock;
+  if (existing >= 0) {
+    block = {
+      ...store.blocks[existing],
+      key,
+      name,
+      description: String(input.description || "").trim(),
+      verifiedDataRequired:
+        input.verifiedDataRequired !== undefined
+          ? Boolean(input.verifiedDataRequired)
+          : store.blocks[existing].verifiedDataRequired,
+      optional: input.optional !== undefined ? Boolean(input.optional) : store.blocks[existing].optional,
+      status: input.status || store.blocks[existing].status,
+      allowedPageTypes: input.allowedPageTypes || store.blocks[existing].allowedPageTypes,
+      updatedAt: now,
+    };
+    nextBlocks = store.blocks.map((row, i) => (i === existing ? block : row));
+  } else {
+    block = {
+      id,
+      industryId,
+      key,
+      name,
+      description: String(input.description || "").trim(),
+      allowedPageTypes: input.allowedPageTypes?.length ? input.allowedPageTypes : ["local_service"],
+      requiredData: [],
+      verifiedDataRequired: Boolean(input.verifiedDataRequired),
+      optional: input.optional !== false,
+      status: input.status || "draft",
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    nextBlocks = [...store.blocks, block];
+  }
+
+  let nextBlueprints = store.blueprints;
+  const bpId = String(input.addToBlueprintId || "").trim();
+  if (bpId) {
+    const bpIdx = nextBlueprints.findIndex((row) => row.id === bpId && row.industryId === industryId);
+    if (bpIdx < 0) return { ok: false as const, error: "Blueprint를 찾을 수 없습니다." };
+    const bp = nextBlueprints[bpIdx];
+    if (!bp.blockKeys.includes(key)) {
+      nextBlueprints = nextBlueprints.map((row, i) =>
+        i === bpIdx
+          ? { ...row, blockKeys: [...row.blockKeys, key], updatedAt: now }
+          : row
+      );
+    }
+  }
+
+  const saved = await saveStore({ ...store, blocks: nextBlocks, blueprints: nextBlueprints });
+  return {
+    ok: true as const,
+    store: saved,
+    block: saved.blocks.find((row) => row.id === block.id) || block,
+    created: existing < 0,
+  };
+}
+
+/** Replace blueprint blockKeys (add/remove membership). */
+export async function setBlueprintBlockKeys(blueprintId: string, blockKeys: string[]) {
+  const store = await loadStore();
+  const idx = store.blueprints.findIndex((row) => row.id === blueprintId);
+  if (idx < 0) return { ok: false as const, error: "Blueprint를 찾을 수 없습니다." };
+  const bp = store.blueprints[idx];
+  const industryBlocks = new Set(
+    store.blocks.filter((row) => row.industryId === bp.industryId).map((row) => row.key)
+  );
+  const cleaned = [...new Set(blockKeys.map((k) => String(k || "").trim()).filter(Boolean))].filter((k) =>
+    industryBlocks.has(k)
+  );
+  const next = {
+    ...store,
+    blueprints: store.blueprints.map((row, i) =>
+      i === idx
+        ? {
+            ...row,
+            blockKeys: cleaned,
+            updatedAt: new Date().toISOString(),
+          }
+        : row
+    ),
+  };
+  const saved = await saveStore(next);
+  return { ok: true as const, store: saved, blueprint: saved.blueprints[idx] };
+}
+
+/** Insert many draft blocks (and optional angles/pageTypes) for an industry. */
+export async function applyIndustryDraftPack(input: {
+  industryId: string;
+  blueprintId?: string;
+  blocks: Array<{
+    key: string;
+    name: string;
+    description?: string;
+    verifiedDataRequired?: boolean;
+  }>;
+  angles?: Array<{ key: string; name: string; description?: string }>;
+  pageTypes?: Array<{ key: string; name: string; description?: string }>;
+}) {
+  const store = await loadStore();
+  const industryId = String(input.industryId || "").trim();
+  const industry = store.industries.find((row) => row.id === industryId);
+  if (!industry) return { ok: false as const, error: "업종을 찾을 수 없습니다." };
+  const now = new Date().toISOString();
+  const short = industry.key.replace(/^ind-/, "") || industry.key;
+
+  const existingBlockKeys = new Set(
+    store.blocks.filter((row) => row.industryId === industryId).map((row) => row.key)
+  );
+  const newBlocks: ContentBlock[] = [];
+  for (const row of input.blocks || []) {
+    const key = slugKey(row.key || row.name);
+    if (!key || existingBlockKeys.has(key)) continue;
+    existingBlockKeys.add(key);
+    newBlocks.push({
+      id: `blk-${short}-${key}-${Date.now().toString(36).slice(-4)}`,
+      industryId,
+      key,
+      name: String(row.name || key).trim(),
+      description: String(row.description || "").trim(),
+      allowedPageTypes: ["local_service"],
+      requiredData: [],
+      verifiedDataRequired: Boolean(row.verifiedDataRequired),
+      optional: true,
+      status: "draft",
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  const existingAngles = new Set(
+    store.angles.filter((row) => row.industryId === industryId).map((row) => row.key)
+  );
+  const newAngles: ContentAngle[] = [];
+  for (const row of input.angles || []) {
+    const key = slugKey(row.key || row.name, "angle");
+    if (!key || existingAngles.has(key)) continue;
+    existingAngles.add(key);
+    newAngles.push({
+      id: `ang-${short}-${key}`,
+      industryId,
+      key,
+      name: String(row.name || key).trim(),
+      description: String(row.description || "").trim(),
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  const existingPts = new Set(
+    store.pageTypes.filter((row) => row.industryId === industryId).map((row) => row.key)
+  );
+  const newPageTypes: PageType[] = [];
+  for (const row of input.pageTypes || []) {
+    const key = slugKey(row.key || row.name, "page");
+    if (!key || existingPts.has(key)) continue;
+    existingPts.add(key);
+    newPageTypes.push({
+      id: `pt-${short}-${key}`,
+      industryId,
+      key,
+      name: String(row.name || key).trim(),
+      description: String(row.description || "").trim(),
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  if (!newBlocks.length && !newAngles.length && !newPageTypes.length) {
+    return { ok: false as const, error: "추가할 새 항목이 없습니다. (키가 이미 있을 수 있습니다)" };
+  }
+
+  let nextBlueprints = store.blueprints;
+  const bpId =
+    String(input.blueprintId || "").trim() ||
+    store.blueprints.find((row) => row.industryId === industryId)?.id ||
+    "";
+  if (bpId && newBlocks.length) {
+    const bpIdx = nextBlueprints.findIndex((row) => row.id === bpId);
+    if (bpIdx >= 0) {
+      const bp = nextBlueprints[bpIdx];
+      const mergedKeys = [...bp.blockKeys];
+      for (const b of newBlocks) {
+        if (!mergedKeys.includes(b.key)) mergedKeys.push(b.key);
+      }
+      const mergedAngles = [...bp.angleKeys];
+      for (const a of newAngles) {
+        if (!mergedAngles.includes(a.key)) mergedAngles.push(a.key);
+      }
+      const mergedPts = [...bp.pageTypeKeys];
+      for (const p of newPageTypes) {
+        if (!mergedPts.includes(p.key)) mergedPts.push(p.key);
+      }
+      nextBlueprints = nextBlueprints.map((row, i) =>
+        i === bpIdx
+          ? {
+              ...row,
+              blockKeys: mergedKeys,
+              angleKeys: mergedAngles,
+              pageTypeKeys: mergedPts,
+              updatedAt: now,
+            }
+          : row
+      );
+    }
+  }
+
+  const saved = await saveStore({
+    ...store,
+    blocks: [...store.blocks, ...newBlocks],
+    angles: [...store.angles, ...newAngles],
+    pageTypes: [...store.pageTypes, ...newPageTypes],
+    blueprints: nextBlueprints,
+  });
+  return {
+    ok: true as const,
+    store: saved,
+    added: {
+      blocks: newBlocks.length,
+      angles: newAngles.length,
+      pageTypes: newPageTypes.length,
+    },
+  };
+}
+
+export async function setIndustryStatus(industryId: string, status: CatalogStatus) {
+  const store = await loadStore();
+  const idx = store.industries.findIndex((row) => row.id === industryId);
+  if (idx < 0) return { ok: false as const, error: "업종을 찾을 수 없습니다." };
+  const next = {
+    ...store,
+    industries: store.industries.map((row, i) =>
+      i === idx ? { ...row, status, updatedAt: new Date().toISOString() } : row
+    ),
+  };
+  const saved = await saveStore(next);
+  return { ok: true as const, store: saved, industry: saved.industries[idx] };
+}
+
+export async function updateIndustryHints(
+  industryId: string,
+  hints: {
+    keywords?: string[];
+    aliases?: string[];
+    serviceTerms?: string[];
+    negativeTerms?: string[];
+    name?: string;
+    description?: string;
+  }
+) {
+  const store = await loadStore();
+  const idx = store.industries.findIndex((row) => row.id === industryId);
+  if (idx < 0) return { ok: false as const, error: "업종을 찾을 수 없습니다." };
+  const current = store.industries[idx];
+  const mergedHints = normalizeResolverHints({
+    keywords: hints.keywords ?? current.resolverHints?.keywords ?? [],
+    aliases: hints.aliases ?? current.resolverHints?.aliases ?? [],
+    serviceTerms: hints.serviceTerms ?? current.resolverHints?.serviceTerms ?? [],
+    negativeTerms: hints.negativeTerms ?? current.resolverHints?.negativeTerms ?? [],
+  });
+  const next = {
+    ...store,
+    industries: store.industries.map((row, i) =>
+      i === idx
+        ? {
+            ...row,
+            name: hints.name !== undefined ? String(hints.name || "").trim() || row.name : row.name,
+            description:
+              hints.description !== undefined
+                ? String(hints.description || "").trim() || undefined
+                : row.description,
+            resolverHints: mergedHints,
+            updatedAt: new Date().toISOString(),
+          }
+        : row
+    ),
+  };
+  const saved = await saveStore(next);
+  return { ok: true as const, store: saved, industry: saved.industries[idx] };
+}
+
+/** Create or update an industry. On create, attaches a minimal draft Blueprint pack. */
+export async function upsertIndustry(input: {
+  id?: string;
+  key: string;
+  name: string;
+  description?: string;
+  status?: CatalogStatus;
+  resolverHints?: {
+    keywords?: string[];
+    aliases?: string[];
+    serviceTerms?: string[];
+    negativeTerms?: string[];
+  };
+  /** When creating, also add draft blueprint + basic AI blocks (default true). */
+  withStarterPack?: boolean;
+}) {
+  const store = await loadStore();
+  const key = String(input.key || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const name = String(input.name || "").trim();
+  if (!key || !name) return { ok: false as const, error: "업종 키(영문)와 이름이 필요합니다." };
+  const now = new Date().toISOString();
+  const id = String(input.id || "").trim() || `ind-${key}`;
+  const existing = store.industries.findIndex((row) => row.id === id || row.key === key);
+  const hints = normalizeResolverHints(input.resolverHints || {});
+  if (existing >= 0) {
+    const next = {
+      ...store,
+      industries: store.industries.map((row, i) =>
+        i === existing
+          ? {
+              ...row,
+              key,
+              name,
+              description: String(input.description || "").trim() || undefined,
+              status: input.status || row.status,
+              resolverHints: hints ?? row.resolverHints,
+              updatedAt: now,
+            }
+          : row
+      ),
+    };
+    const saved = await saveStore(next);
+    return { ok: true as const, store: saved, industry: saved.industries[existing], created: false };
+  }
+  const industry: Industry = {
+    id,
+    key,
+    name,
+    description: String(input.description || "").trim() || undefined,
+    resolverHints: hints,
+    status: input.status || "draft",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  let nextStore: ContentBlueprintStore = {
+    ...store,
+    industries: [...store.industries, industry],
+  };
+
+  const withPack = input.withStarterPack !== false;
+  if (withPack) {
+    const short = key.replace(/^ind-/, "") || key;
+    const pageType: PageType = {
+      id: `pt-${short}-local`,
+      industryId: id,
+      key: "local_service",
+      name: "지역 서비스",
+      description: `${name} 지역·키워드 안내 글`,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    const angles: ContentAngle[] = [
+      {
+        id: `ang-${short}-general`,
+        industryId: id,
+        key: "general",
+        name: "일반 안내",
+        description: "기본 안내 앵글",
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: `ang-${short}-beginner`,
+        industryId: id,
+        key: "beginner",
+        name: "초보 안내",
+        description: "처음 알아보는 독자",
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    const blocks: ContentBlock[] = [
+      {
+        id: `blk-${short}-overview`,
+        industryId: id,
+        key: "overview",
+        name: "개요",
+        description: "주제를 한눈에 보는 도입·범위",
+        allowedPageTypes: ["local_service"],
+        requiredData: [],
+        verifiedDataRequired: false,
+        optional: false,
+        status: "active",
+        version: 1,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: `blk-${short}-checklist`,
+        industryId: id,
+        key: "checklist",
+        name: "확인 체크리스트",
+        description: "선택·의뢰 전 확인할 항목",
+        allowedPageTypes: ["local_service"],
+        requiredData: [],
+        verifiedDataRequired: false,
+        optional: true,
+        status: "active",
+        version: 1,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: `blk-${short}-tips`,
+        industryId: id,
+        key: "tips",
+        name: "실무 팁",
+        description: "현장에서 자주 묻는 요령",
+        allowedPageTypes: ["local_service"],
+        requiredData: [],
+        verifiedDataRequired: false,
+        optional: true,
+        status: "active",
+        version: 1,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: `blk-${short}-faq`,
+        industryId: id,
+        key: "faq",
+        name: "FAQ",
+        description: "자주 묻는 질문 (faqItems로 렌더)",
+        allowedPageTypes: ["local_service"],
+        requiredData: [],
+        verifiedDataRequired: false,
+        optional: true,
+        status: "active",
+        version: 1,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    const blueprint: ContentBlueprint = {
+      id: `bp-${short}-v1`,
+      industryId: id,
+      key: `${short}_v1`,
+      name: `${name} 기본 재료`,
+      description: "관리자에서 만든 기본 Blueprint. 블록을 보강한 뒤 「사용 중」으로 바꾸세요.",
+      blockKeys: blocks.map((b) => b.key),
+      pageTypeKeys: [pageType.key],
+      angleKeys: angles.map((a) => a.key),
+      status: "draft",
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    nextStore = {
+      ...nextStore,
+      pageTypes: [...nextStore.pageTypes, pageType],
+      angles: [...nextStore.angles, ...angles],
+      blocks: [...nextStore.blocks, ...blocks],
+      blueprints: [...nextStore.blueprints, blueprint],
+    };
+  }
+
+  const saved = await saveStore(nextStore);
+  return { ok: true as const, store: saved, industry, created: true };
 }
 
 export async function resetContentBlueprintsToSeed() {

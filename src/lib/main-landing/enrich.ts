@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { DEFAULT_GEMINI_MODEL } from "../gemini-models";
 import { parseCopyOverride } from "./copy-override";
-import { buildScalpTattooV1Base } from "./designs/scalp-tattoo-v1";
+import { buildMainLandingDesignBase } from "./build-base";
 import type { MainLandingConfig, MainLandingCopyOverride, MainLandingVendor } from "./types";
 import { resolveVariationSeed } from "./vary";
 
@@ -31,7 +31,7 @@ export async function enrichMainLandingCopy(
   const vendor: MainLandingVendor = input.config.vendor;
   const siteName = String(input.siteName || vendor.keyword || "").trim() || "사이트";
   const seed = resolveVariationSeed(input.config, siteName);
-  const base = buildScalpTattooV1Base(vendor, siteName);
+  const base = buildMainLandingDesignBase(input.config, siteName);
   const promptExtra = String(input.config.prompt || "").trim();
 
   const genAI = new GoogleGenerativeAI(apiKey);

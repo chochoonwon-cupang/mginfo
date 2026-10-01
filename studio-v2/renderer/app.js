@@ -27,6 +27,120 @@ function parseKeywords(raw) {
     .filter(Boolean);
 }
 
+function emptyVendorGroup() {
+  return {
+    label: "",
+    regions: "",
+    name: "",
+    phone: "",
+    address: "",
+    businessNumber: "",
+    kakao: "",
+    email: "",
+    ceo: "",
+  };
+}
+
+function vendorGroupField(label, key, value, placeholder, type = "text") {
+  const id = `vg-${key}-${Math.random().toString(36).slice(2, 8)}`;
+  return `<div class="vg-field"><label for="${id}">${label}</label><input id="${id}" data-vg-key="${key}" type="${type}" value="${escapeAttr(
+    value || ""
+  )}" placeholder="${escapeAttr(placeholder || "")}" /></div>`;
+}
+
+function escapeAttr(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+}
+
+function renderVendorGroups(groups) {
+  const list = $("vendorGroupsList");
+  if (!list) return;
+  const rows = groups?.length ? groups : [emptyVendorGroup()];
+  list.innerHTML = "";
+  rows.forEach((g, index) => {
+    const card = document.createElement("div");
+    card.className = "vendor-group-card";
+    card.dataset.index = String(index);
+    card.innerHTML = `
+      <div class="vendor-group-card-head">
+        <strong>그룹 ${index + 1}</strong>
+        <button type="button" class="btn sm danger btn-remove-vendor-group" data-index="${index}">삭제</button>
+      </div>
+      <div class="grid-2">
+        ${vendorGroupField("그룹 이름", "label", g.label, "예: A업체 (서부)")}
+        ${vendorGroupField("지역 키워드", "regions", g.regions, "쉼표 구분 · 부천, 시흥, 인천")}
+        ${vendorGroupField("업체명", "name", g.name, "주식회사 인포씨에스")}
+        ${vendorGroupField("전화", "phone", g.phone, "0000-0000")}
+        ${vendorGroupField("사업자등록번호", "businessNumber", g.businessNumber, "224-87-00683")}
+        ${vendorGroupField("카카오", "kakao", g.kakao, "선택")}
+        ${vendorGroupField("이메일", "email", g.email, "선택")}
+        ${vendorGroupField("대표", "ceo", g.ceo, "선택")}
+      </div>
+      ${vendorGroupField("주소", "address", g.address, "비우면 키워드별 시·구·동 자동")}
+    `;
+    list.appendChild(card);
+  });
+  list.querySelectorAll(".btn-remove-vendor-group").forEach((btn) => {
+    btn.onclick = () => {
+      const idx = Number(btn.dataset.index);
+      const next = readVendorGroupsFromDom();
+      next.splice(idx, 1);
+      renderVendorGroups(next.length ? next : [emptyVendorGroup()]);
+    };
+  });
+}
+
+function readVendorGroupsFromDom() {
+  const list = $("vendorGroupsList");
+  if (!list) return [];
+  const cards = [...list.querySelectorAll(".vendor-group-card")];
+  return cards
+    .map((card) => {
+      const row = emptyVendorGroup();
+      card.querySelectorAll("[data-vg-key]").forEach((input) => {
+        const key = input.getAttribute("data-vg-key");
+        if (key && key in row) row[key] = input.value.trim();
+      });
+      return row;
+    })
+    .filter((g) => g.label || g.regions || g.name || g.phone);
+}
+
+async function vendorGroupsFromDraft(draft) {
+  if (Array.isArray(draft?.vendorGroups) && draft.vendorGroups.length) {
+    return draft.vendorGroups.map((g) => ({
+      label: g.label || g.id || "",
+      regions: Array.isArray(g.regions) ? g.regions.join(", ") : String(g.regions || ""),
+      name: g.name || "",
+      phone: g.phone || "",
+      address: g.address || "",
+      businessNumber: g.businessNumber || "",
+      kakao: g.kakao || "",
+      email: g.email || "",
+      ceo: g.ceo || "",
+    }));
+  }
+  const text = String(draft?.vendorGroupsText || "").trim();
+  if (text && window.brandStudio.parseVendorGroupsText) {
+    const parsed = await window.brandStudio.parseVendorGroupsText(text);
+    return (parsed || []).map((g) => ({
+      label: g.label || g.id || "",
+      regions: (g.regions || []).join(", "),
+      name: g.name || "",
+      phone: g.phone || "",
+      address: g.address || "",
+      businessNumber: g.businessNumber || "",
+      kakao: g.kakao || "",
+      email: g.email || "",
+      ceo: g.ceo || "",
+    }));
+  }
+  return [];
+}
+
 function collectPayload() {
   return {
     id: state.draftId || undefined,
@@ -42,6 +156,8 @@ function collectPayload() {
     naverPassword: $("naverPassword").value.trim(),
     naverSiteVerification: $("naverSiteVerification").value.trim(),
     naverMetaMap: $("naverMetaMap").value,
+    vendorGroups: readVendorGroupsFromDom(),
+    useGeminiEnrich: Boolean($("useGeminiEnrich")?.checked),
     vendor: {
       name: $("vendorName").value.trim(),
       phone: $("vendorPhone").value.trim(),
@@ -95,6 +211,19 @@ function fillForm(draft) {
   $("naverPassword").value = draft?.naverPassword || "";
   $("naverSiteVerification").value = draft?.naverSiteVerification || "";
   $("naverMetaMap").value = draft?.naverMetaMap || "";
+  if ($("useGeminiEnrich")) $("useGeminiEnrich").checked = Boolean(draft?.useGeminiEnrich);
+  vendorGroupsFromDraft(draft).then((groups) => {
+    renderVendorGroups(groups.length ? groups : [emptyVendorGroup()]);
+  });
+}
+
+const btnAddVendorGroup = $("btn-add-vendor-group");
+if (btnAddVendorGroup) {
+  btnAddVendorGroup.onclick = () => {
+    const next = readVendorGroupsFromDom();
+    next.push(emptyVendorGroup());
+    renderVendorGroups(next);
+  };
 }
 
 function renderPreviews(rows) {
@@ -311,6 +440,7 @@ $("btn-save-settings").onclick = async () => {
       repo: $("repo").value,
       opsHubUrl: $("opsHubUrl").value,
       opsMasterPassword: $("opsMasterPassword").value,
+      deploymentProtectionBypass: $("deploymentProtectionBypass").value,
       geminiApiKey: $("geminiApiKey").value,
       geminiModel: $("geminiModel").value,
     });
@@ -339,29 +469,6 @@ $("btn-save-settings").onclick = async () => {
   }
 };
 
-$("btn-import-studio").onclick = async () => {
-  try {
-    const res = await window.brandStudio.importStudioSettings();
-    state.config = res.config || {};
-    $("teamId").value = state.config.teamId || "";
-    $("repo").value = state.config.repo || "";
-    $("opsHubUrl").value = state.config.opsHubUrl || "";
-    $("opsMasterPassword").value = state.config.opsMasterPassword || "";
-    $("geminiModel").value = state.config.geminiModel || "";
-    $("geminiApiKey").value = "";
-    $("geminiApiKey").placeholder = state.config.hasGeminiKey
-      ? "저장됨 · 바꾸려면 새 키 입력"
-      : "AIza… (메인 내용 보충·사이트마다 다른 카피)";
-    $("token").value = "";
-    $("token").placeholder = state.config.hasToken ? "기존 스튜디오에서 가져옴 · 저장됨" : "vercel_ 로 시작하는 토큰";
-    $("settings-status").textContent = "기존 Infocs Studio 설정을 가져왔습니다.";
-    $("settings-status").style.color = "";
-  } catch (err) {
-    $("settings-status").textContent = err.message;
-    $("settings-status").style.color = "#f0a0a0";
-  }
-};
-
 $("btn-verify").onclick = async () => {
   try {
     const info = await window.brandStudio.verifyToken();
@@ -372,6 +479,41 @@ $("btn-verify").onclick = async () => {
     $("settings-status").style.color = "#f0a0a0";
   }
 };
+
+const btnApplyVendorGroups = $("btn-apply-vendor-groups");
+if (btnApplyVendorGroups) {
+  btnApplyVendorGroups.onclick = async () => {
+    try {
+      const res = await window.brandStudio.applyVendorGroups(collectPayload());
+      setStatus(
+        `업체 그룹 ${res.count || 0}개 저장 · ${res.hostsUpdated || 0}개 도메인 메인에 반영했습니다.`
+      );
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  };
+}
+
+const btnClearSites = $("btn-clear-sites");
+if (btnClearSites) {
+  btnClearSites.onclick = async () => {
+    if (!state.sites.length) {
+      setStatus("발행 대장이 이미 비어 있습니다.");
+      return;
+    }
+    if (!confirm(`발행 대장 ${state.sites.length}개 항목을 모두 삭제할까요?\n(Vercel·사이트 자체는 삭제되지 않습니다)`)) return;
+    try {
+      const res = await window.brandStudio.clearSites();
+      state.sites = res.sites || [];
+      state.sitePage = 1;
+      $("site-edit").hidden = true;
+      renderSites();
+      setStatus("발행 대장을 비웠습니다.");
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  };
+}
 
 const vercelLink = $("link-vercel-tokens");
 if (vercelLink) {
@@ -392,16 +534,23 @@ async function boot() {
   $("repo").value = state.config.repo || "";
   $("opsHubUrl").value = state.config.opsHubUrl || "";
   $("opsMasterPassword").value = state.config.opsMasterPassword || "";
+  $("deploymentProtectionBypass").value = "";
+  $("deploymentProtectionBypass").placeholder = state.config.hasDeploymentBypass
+    ? "저장됨 · 바꾸려면 새 시크릿 입력"
+    : "Protected deployment 401 일 때 Vercel에서 생성";
   $("geminiModel").value = state.config.geminiModel || "";
   $("geminiApiKey").value = "";
   $("geminiApiKey").placeholder = state.config.hasGeminiKey
     ? "저장됨 · 바꾸려면 새 키 입력"
     : "AIza… (메인 내용 보충·사이트마다 다른 카피)";
   if (state.drafts[0]) fillForm(state.drafts[0]);
-  else $("siteTheme").value = "random";
+  else {
+    $("siteTheme").value = "random";
+    renderVendorGroups([emptyVendorGroup()]);
+  }
   renderSites();
   if (!state.config.hasToken) {
-    $("settings-status").textContent = "토큰이 없습니다. 기존 스튜디오 설정을 가져오거나 토큰을 저장하세요.";
+    $("settings-status").textContent = "토큰이 없습니다. 계정 설정에서 Vercel 토큰을 저장하세요.";
   } else if (!state.config.hasGeminiKey) {
     $("settings-status").textContent = "제미나이 키가 없습니다. 계정 설정에 넣어야 사이트마다 메인 내용이 달라집니다.";
   }

@@ -23,6 +23,15 @@ import {
 } from "./engagement";
 import { parseNaverVerification } from "./seo";
 import { pickFooterDisclaimer } from "./publish-disclaimer";
+import { fallbackSiteTagline } from "./site-tagline";
+import {
+  getHostProfile,
+  isKeywordSubdomainHost,
+  mergeHostIntoSettings,
+  normalizeHostKey,
+  normalizeHostProfiles,
+} from "./host-profiles";
+import { normalizeVendorGroups } from "./vendor-groups";
 
 const LOCAL_PATH = path.join(process.cwd(), "data", "store.json");
 
@@ -39,7 +48,9 @@ function defaultSettings(): Settings {
     geminiApiKey: process.env.GEMINI_API_KEY || "",
     geminiModel: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
     siteName: customName || SITE.name,
-    siteTagline: "모든 생활 정보를 한눈에",
+    siteTagline:
+      String(process.env.SITE_TAGLINE || "").trim() ||
+      (customName ? fallbackSiteTagline(customName, "env-seed") : "모든 생활 정보를 한눈에"),
     siteTheme: DEFAULT_SITE_THEME,
     carrotKeywords: "",
     popupEnabled: true,
@@ -159,6 +170,8 @@ function normalize(parsed: Store): Store {
     parsed.settings.commentCountMax = DEFAULT_COMMENT_MAX;
   }
   parsed.bulkPublish = normalizeBulkPublish(parsed.bulkPublish);
+  parsed.hostProfiles = normalizeHostProfiles(parsed.hostProfiles);
+  parsed.vendorGroups = normalizeVendorGroups(parsed.vendorGroups);
   return parsed;
 }
 
@@ -181,19 +194,15 @@ async function loadStore(): Promise<Store> {
     if (remote) return persistSeededVendors(remote, building, (store) => blobSetJson(store));
     const initial = defaultStore();
     if (building) return initial;
-    try {
-      await blobSetJson(initial);
-    } catch {
-      return initial;
-    }
+    // 빈 Blob일 때 여기서 바로 기본값을 쓰면, 동시 부트스트랩(메인랜딩 ON)과
+    // 경쟁해 설정을 덮어쓸 수 있다. 첫 저장은 updateStore(부트스트랩 등)에 맡긴다.
     return initial;
   }
   if (hasRemoteStore()) {
     const remote = await kvGetJson<Store>();
     if (remote) return persistSeededVendors(remote, building, (store) => kvSetJson(store));
-    const initial = defaultStore();
-    await kvSetJson(initial);
-    return initial;
+    // Blob과 동일: 빈 저장소 선기록은 부트스트랩과 경쟁하므로 하지 않음
+    return defaultStore();
   }
   if (!fs.existsSync(LOCAL_PATH)) return defaultStore();
   try {
@@ -355,6 +364,21 @@ function shouldSeedDefaultVendors(store: Store) {
 
 export async function getSettings(): Promise<Settings> {
   return (await readStore()).settings;
+}
+
+/** Global settings merged with per-host profile (home / SEO for that domain). */
+export async function getSettingsForRequestHost(requestHost?: string): Promise<Settings> {
+  const store = await readStore();
+  const host = normalizeHostKey(String(requestHost || ""));
+  if (!host) return store.settings;
+  const profile = getHostProfile(store, host);
+  if (profile) return mergeHostIntoSettings(store.settings, profile);
+  if (isKeywordSubdomainHost(host)) {
+    return mergeHostIntoSettings(store.settings, {
+      mainLanding: parseMainLandingConfig({ enabled: false }),
+    });
+  }
+  return store.settings;
 }
 
 export async function getCategories(): Promise<Category[]> {

@@ -96,7 +96,7 @@ export type WriterResult = {
   slugHint?: string;
 };
 
-export type GenerationMode = "planner_writer_v1" | "legacy" | "legacy_fallback";
+export type GenerationMode = "planner_writer_v1" | "legacy" | "legacy_fallback" | "held";
 
 export type TokenUsage = {
   inputTokens: number | null;
@@ -134,6 +134,14 @@ export type GenerationLog = {
   failureCodes?: string[];
   fallbackReason?: string;
   fallbackCode?: string;
+  /** PHASE 7 publish gate */
+  publishDecision?: "PASS" | "WARN_PUBLISH" | "HOLD";
+  failureCategory?: "TECHNICAL_FAILURE" | "QUALITY_FAILURE" | "VERIFIED_DATA_FAILURE";
+  resolverConfidence?: string;
+  resolverSignals?: string[];
+  verifiedContextSummary?: string;
+  /** PHASE 8 — Reference entities used in Writer prompt */
+  referenceEntityIds?: string[];
   errors: string[];
   startedAt: string;
   finishedAt: string;

@@ -1,6 +1,13 @@
 import { applyCopyOverride } from "./copy-override";
-import { buildScalpTattooV1Base } from "./designs/scalp-tattoo-v1";
-import type { MainLandingConfig, MainLandingCopy, MainLandingSectionId, MainLandingTheme } from "./types";
+import { applyPooledMainLandingCopy } from "./copy-pool";
+import { buildMainLandingDesignBase } from "./build-base";
+import type {
+  DemolitionBlockId,
+  MainLandingConfig,
+  MainLandingCopy,
+  MainLandingSectionId,
+  MainLandingTheme,
+} from "./types";
 
 const THEMES: MainLandingTheme[] = [
   { accent: "#0a3d3c", teal: "#1bb8a9", tealDeep: "#0f8578", soft: "#cceee9", bg: "#ecf6f4" },
@@ -15,6 +22,31 @@ const ORDERS: MainLandingSectionId[][] = [
   ["hero", "about", "process", "services", "gallery", "director", "reviews", "faq"],
   ["hero", "services", "gallery", "about", "process", "director", "reviews", "faq"],
   ["hero", "about", "services", "process", "gallery", "director", "reviews", "faq"],
+];
+
+const DEMOLITION_ORDERS: MainLandingSectionId[][] = [
+  ["hero", "reviews", "about", "process", "gallery", "services", "director", "faq"],
+  ["hero", "about", "reviews", "process", "services", "gallery", "director", "faq"],
+];
+
+const DEMOLITION_THEMES: MainLandingTheme[] = [
+  { accent: "#1a2332", teal: "#e85d04", tealDeep: "#c2410c", soft: "#ffedd5", bg: "#faf7f2" },
+  { accent: "#0f172a", teal: "#f97316", tealDeep: "#ea580c", soft: "#fed7aa", bg: "#fff7ed" },
+  { accent: "#1e293b", teal: "#fb923c", tealDeep: "#dc2626", soft: "#ffe4e6", bg: "#f8fafc" },
+  { accent: "#0c4a6e", teal: "#0284c7", tealDeep: "#0369a1", soft: "#e0f2fe", bg: "#f0f9ff" },
+  { accent: "#14532d", teal: "#16a34a", tealDeep: "#15803d", soft: "#dcfce7", bg: "#f0fdf4" },
+  { accent: "#312e81", teal: "#7c3aed", tealDeep: "#6d28d9", soft: "#ede9fe", bg: "#f5f3ff" },
+  { accent: "#422006", teal: "#d97706", tealDeep: "#b45309", soft: "#fef3c7", bg: "#fffbeb" },
+  { accent: "#134e4a", teal: "#0d9488", tealDeep: "#0f766e", soft: "#ccfbf1", bg: "#f0fdfa" },
+];
+
+const DEMOLITION_BLOCK_ORDERS: DemolitionBlockId[][] = [
+  ["reviews", "about", "process", "gallery", "services", "grant", "trust", "cta", "faq"],
+  ["about", "reviews", "process", "gallery", "services", "trust", "grant", "cta", "faq"],
+  ["gallery", "reviews", "about", "process", "grant", "services", "trust", "faq", "cta"],
+  ["reviews", "process", "about", "gallery", "grant", "cta", "trust", "services", "faq"],
+  ["about", "process", "gallery", "reviews", "trust", "grant", "services", "faq", "cta"],
+  ["process", "reviews", "about", "gallery", "grant", "trust", "cta", "faq"],
 ];
 
 function hashSeed(text: string) {
@@ -48,10 +80,12 @@ export function resolveVariationSeed(config: MainLandingConfig, siteName: string
 export function buildMainLandingCopy(config: MainLandingConfig, siteName: string): MainLandingCopy {
   const seed = resolveVariationSeed(config, siteName);
   const rand = mulberry32(hashSeed(seed));
-  const rawBase = buildScalpTattooV1Base(config.vendor, siteName);
+  const rawBase = buildMainLandingDesignBase(config, siteName);
   const base = applyCopyOverride(rawBase, config.copyOverride);
-  const order = ORDERS[Math.floor(rand() * ORDERS.length)] || ORDERS[0];
-  const theme = THEMES[Math.floor(rand() * THEMES.length)] || THEMES[0];
+  const orderPool = config.designId === "demolition-v1" ? DEMOLITION_ORDERS : ORDERS;
+  const themePool = config.designId === "demolition-v1" ? DEMOLITION_THEMES : THEMES;
+  const order = orderPool[Math.floor(rand() * orderPool.length)] || orderPool[0];
+  const theme = themePool[Math.floor(rand() * themePool.length)] || themePool[0];
 
   const processSteps = [...base.processSteps];
   if (!config.copyOverride?.processSteps && rand() > 0.65 && processSteps.length > 2) {
@@ -77,7 +111,15 @@ export function buildMainLandingCopy(config: MainLandingConfig, siteName: string
       ? `${base.aboutBody} ${extra.slice(0, 100)}`
       : base.aboutBody;
 
-  return {
+  const demolitionBlockOrder =
+    config.designId === "demolition-v1"
+      ? DEMOLITION_BLOCK_ORDERS[Math.floor(rand() * DEMOLITION_BLOCK_ORDERS.length)] ||
+        DEMOLITION_BLOCK_ORDERS[0]
+      : undefined;
+  const demolitionLayoutVariant =
+    config.designId === "demolition-v1" ? Math.floor(rand() * 3) : undefined;
+
+  const merged = {
     ...base,
     heroLead,
     aboutBody,
@@ -87,5 +129,9 @@ export function buildMainLandingCopy(config: MainLandingConfig, siteName: string
     theme,
     accent: theme.accent,
     sectionOrder: order,
+    demolitionBlockOrder,
+    demolitionLayoutVariant,
   };
+
+  return applyPooledMainLandingCopy(merged, config, siteName, rand);
 }

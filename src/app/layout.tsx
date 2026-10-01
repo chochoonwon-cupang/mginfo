@@ -10,8 +10,10 @@ import "./theme-portal.css";
 import "./theme-carrot.css";
 import "./theme-studio.css";
 import { siteBrand } from "@/lib/categories";
-import { getSettings } from "@/lib/db";
-import { resolveNaverVerification, SITE_ORIGIN } from "@/lib/seo";
+import { getSettings, getSettingsForRequestHost } from "@/lib/db";
+import { getRequestHost } from "@/lib/host-profiles";
+import { resolvePublicOrigin } from "@/lib/main-landing/resolve-origin";
+import { resolveNaverVerification } from "@/lib/seo";
 
 export const dynamic = "force-dynamic";
 
@@ -22,21 +24,23 @@ export const viewport: Viewport = {
 };
 
 export async function generateMetadata(): Promise<Metadata> {
-  const settings = await getSettings();
+  const host = await getRequestHost();
+  const settings = host ? await getSettingsForRequestHost(host) : await getSettings();
   const brand = siteBrand(settings);
   const naverVerification = resolveNaverVerification(settings.naverSiteVerification);
+  const origin = await resolvePublicOrigin();
   return {
     title: {
       default: `${brand.name} — ${brand.tagline}`,
       template: `%s | ${brand.name}`,
     },
     description: brand.description,
-    metadataBase: new URL(SITE_ORIGIN),
+    metadataBase: new URL(origin),
     robots: { index: true, follow: true },
     openGraph: {
       title: `${brand.name} — ${brand.tagline}`,
       description: brand.description,
-      url: SITE_ORIGIN,
+      url: origin,
       siteName: brand.name,
       locale: "ko_KR",
       type: "website",

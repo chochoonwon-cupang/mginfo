@@ -13,7 +13,6 @@ import { seoulDateKey } from "./publish-limits";
 import { extractPlaceName, parseNameList } from "./region-geo";
 import { cleanHtml } from "./sanitize";
 import { articleSlug, slugify, uid } from "./slug";
-import { attachLocalFactBlocks } from "./article-blocks";
 import { collectTodayKeywords, uniqueTextList, withUniqueArticle } from "./title-uniqueness";
 import type { Post, Settings } from "./types";
 import { normalizeHttpUrl, parseVendorFields } from "./vendor";
@@ -21,6 +20,7 @@ import { parseYoutubeUrlPair, preferYoutubePair } from "./youtube";
 import { ensureVendorSlots } from "./vendor-slots";
 import { pickRandomPostImages, mergeImageUrls } from "./image-pool";
 import { discoverWebFolderImages } from "./web-image-folder";
+import { renderHubBoardTemplateArticle } from "./hub-board-templates";
 
 /** Spread publish times evenly across [start, end]. Avoids midnight pile-up. */
 function evenPublishSlots(count: number, start: Date, end: Date): Date[] {
@@ -38,6 +38,7 @@ function evenPublishSlots(count: number, start: Date, end: Date): Date[] {
   }
   return slots;
 }
+
 export type HubBoardResult = {
   siteId: string;
   domain: string;
@@ -70,6 +71,8 @@ export type HubBoardSchedule = {
   planDate: string;
 };
 
+export type HubBoardContentMode = "gemini" | "template";
+
 export type HubBoardCampaign = {
   id: string;
   title: string;
@@ -80,8 +83,16 @@ export type HubBoardCampaign = {
   vendorId?: string;
   vendorIds?: string[];
   writingStyle: string;
+  /** gemini = LLM 작성, template = 코드 시드 양식(제미나이 없음). */
+  contentMode: HubBoardContentMode;
+  /** contentMode=template 일 때 레지스트리 양식 id. */
+  templateId?: string;
   imagePool?: string[];
   imageFolderUrl?: string;
+  /** 본문·대표 사진 랜덤 장수 하한 (1~7). */
+  imageCountMin?: number;
+  /** 본문·대표 사진 랜덤 장수 상한 (1~7). */
+  imageCountMax?: number;
   extraPrompt?: string;
   dailyLimit: number;
   siteIds: string[];
@@ -121,6 +132,12 @@ function clampHour(value: unknown, fallback: number) {
   const num = Number(value);
   if (!Number.isFinite(num)) return fallback;
   return Math.min(23, Math.max(0, Math.floor(num)));
+}
+
+function clampHubImageCount(value: unknown, fallback: number) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(7, Math.max(1, Math.floor(num)));
 }
 
 function normalizeKeyword(raw: unknown): HubBoardKeyword | null {
@@ -172,6 +189,12 @@ export function parseHubCampaign(raw: unknown, current?: HubBoardCampaign): HubB
     keywords.length,
     Math.floor(Number(row.keywordCount ?? current?.keywordCount) || 0)
   );
+  const modeRaw = trimText(row.contentMode ?? current?.contentMode).toLowerCase();
+  const contentMode: HubBoardContentMode = modeRaw === "template" ? "template" : "gemini";
+  const templateId =
+    contentMode === "template"
+      ? trimText(row.templateId ?? current?.templateId) || "goldendoodle-adoption"
+      : trimText(row.templateId ?? current?.templateId) || undefined;
   return {
     id: trimText(row.id ?? current?.id) || uid(),
     title,
@@ -188,8 +211,15 @@ export function parseHubCampaign(raw: unknown, current?: HubBoardCampaign): HubB
         : current?.imagePool || (current?.coverImage ? [current.coverImage] : [])
     ),
     writingStyle: trimText(row.writingStyle ?? current?.writingStyle) || "random",
+    contentMode,
+    templateId,
     extraPrompt: trimText(row.extraPrompt ?? current?.extraPrompt) || undefined,
     imageFolderUrl: trimText(row.imageFolderUrl ?? current?.imageFolderUrl) || undefined,
+    imageCountMin: clampHubImageCount(row.imageCountMin ?? current?.imageCountMin, 1),
+    imageCountMax: Math.max(
+      clampHubImageCount(row.imageCountMin ?? current?.imageCountMin, 1),
+      clampHubImageCount(row.imageCountMax ?? current?.imageCountMax, 3)
+    ),
     dailyLimit: Math.max(1, Math.min(9999, Math.floor(Number(row.dailyLimit ?? current?.dailyLimit) || 1))),
     siteIds,
     nextSiteIndex: Math.max(0, Math.floor(Number(row.nextSiteIndex ?? current?.nextSiteIndex) || 0)),
@@ -713,6 +743,9 @@ export async function generateHubBoardArticle(
   settings: Settings,
   avoid?: { titles?: string[]; keywords?: string[]; bodies?: string[] }
 ) {
+  if (campaign.contentMode === "template") {
+    return renderHubBoardTemplateArticle(campaign, keyword, site, settings, avoid);
+  }
   const apiKey = settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
   if (!apiKey) throw new Error("허브 마스터설정에 제미나이 API 키가 없습니다.");
   const extraPrompt = trimText(campaign.extraPrompt);
@@ -781,24 +814,18 @@ export async function generateHubBoardArticle(
       imagePool = [];
     }
   }
-  const photos = pickRandomPostImages(imagePool, 1, 3);
+  const photos = pickRandomPostImages(
+    imagePool,
+    campaign.imageCountMin || 1,
+    campaign.imageCountMax || 3
+  );
   const youtube = preferYoutubePair(keyword, campaign);
   return {
     hubCampaignId: `${campaign.id}:${keyword.id}`,
     title: article.title,
     excerpt: article.excerpt || keyword.keyword,
-    bodyHtml: cleanHtml(
-      ensureVendorSlots(
-        attachLocalFactBlocks({
-          html: article.bodyHtml || "",
-          place: extractPlaceName(article.title, keyword.keyword) || place,
-          keyword: keyword.keyword,
-          categoryName: "자유게시판",
-          slug: article.slugHint,
-          title: article.title,
-        })
-      )
-    ),
+    // 지역·공공 팩트는 본문에 심지 않고 글 페이지 하단 접기에서만 노출
+    bodyHtml: cleanHtml(ensureVendorSlots(article.bodyHtml || "")),
     coverImage: photos.cover || "",
     extraImages: photos.extras,
     focusKeyword: keyword.keyword,
@@ -851,16 +878,7 @@ export function makeBoardPost(body: Record<string, unknown>, existing: Post[]): 
     slug,
     title,
     excerpt: trimText(body.excerpt) || title,
-    bodyHtml: cleanHtml(
-      ensureVendorSlots(
-        attachLocalFactBlocks({
-          html: String(body.bodyHtml || ""),
-          place: trimText(body.region),
-          keyword: trimText(body.focusKeyword) || title,
-          title,
-        })
-      )
-    ),
+    bodyHtml: cleanHtml(ensureVendorSlots(String(body.bodyHtml || ""))),
     category: FREE_BOARD_SLUG,
     tags: Array.isArray(body.tags) ? body.tags.map((item) => String(item)).filter(Boolean) : ["자유게시판"],
     coverImage: trimText(body.coverImage) || undefined,
@@ -882,7 +900,7 @@ export function makeBoardPost(body: Record<string, unknown>, existing: Post[]): 
     publishedAt: now,
     createdAt: now,
     updatedAt: now,
-    theme: "art-v1",
+    theme: "art-blog",
     hubCampaignId,
     region: trimText(body.region) || undefined,
     ...vendor,

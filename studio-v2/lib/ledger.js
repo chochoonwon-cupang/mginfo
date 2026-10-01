@@ -49,4 +49,9 @@ function upsertSite(userData, row) {
   return sites;
 }
 
-module.exports = { readSites, writeSites, upsertSite };
+function clearSites(userData) {
+  writeSites(userData, []);
+  return [];
+}
+
+module.exports = { readSites, writeSites, upsertSite, clearSites };

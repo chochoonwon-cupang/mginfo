@@ -16,7 +16,7 @@ import { MultiFileButton } from "@/components/admin/MultiFileButton";
 import { VendorPicker } from "@/components/admin/VendorPicker";
 import { MAX_LISTING_VENDORS } from "@/lib/vendor-ads";
 import { ensureVendorSlots } from "@/lib/vendor-slots";
-import type { Category, CategorySlug, FaqItem, Post, PostImage, PostStatus } from "@/lib/types";
+import type { Category, CategorySlug, FaqItem, Post, PostImage, PostStatus, PublishMode } from "@/lib/types";
 
 const EMPTY_FAQ: FaqItem = { question: "", answer: "" };
 
@@ -26,8 +26,18 @@ function padFaqs(items?: FaqItem[]): FaqItem[] {
   return next;
 }
 
-export function PostEditor({ post }: { post?: Post }) {
+export function PostEditor({
+  post,
+  variant = "admin",
+  defaultPublishMode,
+}: {
+  post?: Post;
+  variant?: "admin" | "public";
+  defaultPublishMode?: PublishMode;
+}) {
   const router = useRouter();
+  const publishMode: PublishMode = defaultPublishMode || post?.publishMode || "ai";
+  const isPublic = variant === "public";
   const [title, setTitle] = useState(post?.title || "");
   const [slug, setSlug] = useState(post?.slug || "");
   const [excerpt, setExcerpt] = useState(post?.excerpt || "");
@@ -80,6 +90,14 @@ export function PostEditor({ post }: { post?: Post }) {
   );
   const [faqOpen, setFaqOpen] = useState(Boolean(post?.faqItems?.some((item) => item.question && item.answer)));
   const [vendorCatalog, setVendorCatalog] = useState<{ id: string; name: string }[]>([]);
+  const [gateNote, setGateNote] = useState("");
+  const [imageFolderUrl, setImageFolderUrl] = useState("");
+  const [folderBusy, setFolderBusy] = useState(false);
+  const [vendorLabels, setVendorLabels] = useState<Record<string, string>>(() => {
+    const start: Record<string, string> = {};
+    if (post?.vendorId && post?.vendorName) start[post.vendorId] = post.vendorName;
+    return start;
+  });
   const notesForCategory = useRef("");
 
   useEffect(() => {
@@ -130,6 +148,7 @@ export function PostEditor({ post }: { post?: Post }) {
   async function runGenerate() {
     setError("");
     setMessage("");
+    setGateNote("");
     if (!focusKeyword.trim()) {
       setError("제미나이로 쓰려면 메인 키워드를 입력하세요.");
       return;
@@ -147,11 +166,29 @@ export function PostEditor({ post }: { post?: Post }) {
           focusKeyword,
           region: region.trim() || extractPlaceName(focusKeyword, title, keywords),
           vendorName,
+          vendorId: vendorId || vendorIds[0] || "",
+          vendorPhone,
+          vendorWebsite,
+          vendorKakao,
           experienceNotes: extraPrompt,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "생성 실패");
+      if (!res.ok) {
+        if (data.publishGate || data.generationLog) {
+          setGateNote(
+            [
+              data.publishGate || "HOLD",
+              data.generationMode,
+              data.industryId,
+              data.error,
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          );
+        }
+        throw new Error(data.error || "생성 실패");
+      }
       setTitle(data.article.title);
       setExcerpt(data.article.excerpt || "");
       setBodyHtml(ensureVendorSlots(data.article.bodyHtml || ""));
@@ -167,6 +204,17 @@ export function PostEditor({ post }: { post?: Post }) {
         if (found) setRegion(found);
       }
       const styleNote = data.writingStyleLabel ? ` ${data.writingStyleLabel}으로 작성했습니다.` : "";
+      const gate = data.publishGate || data.article?.generationLog?.publishDecision || "";
+      setGateNote(
+        [
+          gate,
+          data.generationMode || data.article?.generationMode,
+          data.industryId || data.article?.industryId,
+          data.contentAngle || data.article?.contentAngle,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      );
       setMessage(`제미나이 초안을 넣었습니다.${styleNote} 확인하고 발행하세요.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "생성 실패");
@@ -242,6 +290,43 @@ export function PostEditor({ post }: { post?: Post }) {
     }
   }
 
+  async function importFolderImages() {
+    const folder = imageFolderUrl.trim();
+    if (!folder) {
+      setError("웹 폴더 주소를 넣으세요. 예: https://image.cattery.co.kr/dalma/");
+      return;
+    }
+    setFolderBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const res = await fetch("/api/admin/bulk/folder-images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: folder }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "폴더를 읽지 못했습니다.");
+      const urls = Array.isArray(data.urls)
+        ? data.urls.map((item: unknown) => String(item || "")).filter(Boolean)
+        : [];
+      if (!urls.length) {
+        setError("폴더에서 이미지를 찾지 못했습니다. 주소와 목록 공개 여부를 확인하세요.");
+        return;
+      }
+      const extraCap = extraImageLimit(true);
+      const nextCover = urls[0];
+      const nextExtras = urls.slice(1, 1 + extraCap).map((url: string) => ({ url, caption: "" }));
+      setCoverImage(nextCover);
+      setExtraImages(nextExtras);
+      setMessage(`폴더에서 ${1 + nextExtras.length}장을 가져왔습니다.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "폴더를 읽지 못했습니다.");
+    } finally {
+      setFolderBusy(false);
+    }
+  }
+
   async function save() {
     setError("");
     setMessage("");
@@ -274,6 +359,7 @@ export function PostEditor({ post }: { post?: Post }) {
         faqItems: faqItems.filter((item) => item.question.trim() && item.answer.trim()),
         status,
         theme,
+        publishMode,
         region: region.trim() || extractPlaceName(resolvedTitle, focusKeyword, keywords),
         regionInfo,
         nearbyAreas,
@@ -304,13 +390,268 @@ export function PostEditor({ post }: { post?: Post }) {
             : " 네이버 색인 요청은 나중에 다시 시도됩니다."
           : "";
       setMessage((status === "published" ? "발행했습니다." : "초안으로 저장했습니다.") + indexed);
-      router.push("/admin/posts");
+      if (isPublic && status === "published" && data.post?.slug) {
+        router.push(`/posts/${data.post.slug}`);
+      } else if (isPublic) {
+        router.push("/admin/posts");
+      } else {
+        router.push("/admin/posts");
+      }
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "저장 실패");
     } finally {
       setBusy(false);
     }
+  }
+
+  if (isPublic) {
+    return (
+      <div className="blog-ai-editor">
+        <div className="blog-ai-hero">
+          <h2>AI로 글 만들기</h2>
+          <p>메인 키워드를 넣고 초안 생성을 누르면 글이 만들어집니다. 아래 설정을 먼저 고르면 초안에 반영됩니다.</p>
+          <label className="blog-ai-kw-label" htmlFor="ai-focus-keyword">
+            메인 키워드
+          </label>
+          <input
+            id="ai-focus-keyword"
+            className="blog-ai-kw"
+            value={focusKeyword}
+            onChange={(e) => setFocusKeyword(e.target.value)}
+            placeholder="예: 부천강아지분양"
+            disabled={genBusy}
+          />
+        </div>
+
+        <details className="blog-ai-more blog-ai-pre">
+          <summary>
+            <span className="blog-ai-summary-title">초안 생성 전 설정</span>
+            <span className="blog-ai-summary-hint">
+              글 방향·보조 키워드·추가 프롬프트·업체·이미지 웹 폴더를 선택해 두면, 초안 생성 시 해당 내용이 반영됩니다.
+            </span>
+          </summary>
+          <div className="blog-ai-more-body">
+            <label>글 방향 / 작성 형식</label>
+            <div className="article-style-groups">
+              <div className="article-style-group">
+                <div className="article-style-row">
+                  <button
+                    type="button"
+                    className={writingStyle === "random" ? "on" : ""}
+                    onClick={() => setWritingStyle("random")}
+                  >
+                    랜덤
+                  </button>
+                </div>
+              </div>
+              {ARTICLE_STYLE_GROUPS.map((group) => (
+                <div key={group.id} className="article-style-group">
+                  <strong>{group.label}</strong>
+                  <div className="article-style-row">
+                    {ARTICLE_STYLE_OPTIONS.filter((item) => item.group === group.id).map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        className={writingStyle === item.value ? "on" : ""}
+                        onClick={() => setWritingStyle(item.value)}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="field-hint" style={{ marginTop: 0 }}>
+              {writingStyle === "random"
+                ? randomStyleHint(focusKeyword, keywords, title)
+                : ARTICLE_STYLE_OPTIONS.find((item) => item.value === writingStyle)?.hint}
+            </p>
+
+            <label>보조 키워드 (선택)</label>
+            <input
+              value={keywords}
+              onChange={(e) => setKeywords(e.target.value)}
+              placeholder="예: 분양, 접종, 상담"
+            />
+
+            <label>추가 프롬프트 (선택)</label>
+            <textarea
+              value={extraPrompt}
+              onChange={(e) => setExtraPrompt(e.target.value)}
+              placeholder="실제 방문·상담 메모가 있으면 적어 주세요."
+              style={{ minHeight: 100 }}
+            />
+
+            <label>소개 업체 (선택)</label>
+            <div className="blog-ai-vendor-row">
+              <VendorPicker
+                label={vendorIds.length ? "업체 추가" : "업체 선택"}
+                onPick={(fields) => {
+                  if (vendorIds.includes(fields.vendorId)) return;
+                  if (vendorIds.length >= MAX_LISTING_VENDORS) {
+                    setError(`안내 업체는 ${MAX_LISTING_VENDORS}곳까지입니다.`);
+                    return;
+                  }
+                  const label = String(fields.vendorName || "").trim() || fields.vendorId;
+                  const next = [...vendorIds, fields.vendorId];
+                  setVendorIds(next);
+                  setVendorId(next[0]);
+                  setVendorLabels((prev) => ({ ...prev, [fields.vendorId]: label }));
+                  if (!vendorIds.length) {
+                    setVendorName(label);
+                    setVendorPhone(fields.vendorPhone);
+                    setVendorWebsite(fields.vendorWebsite);
+                    setVendorKakao(fields.vendorKakao);
+                    setVendorBizNo(fields.vendorBizNo);
+                    setVendorAddress(fields.vendorAddress);
+                    setYoutubeUrl1(fields.youtubeUrl1);
+                    setYoutubeUrl2(fields.youtubeUrl2);
+                  }
+                }}
+              />
+              <p className="field-hint" style={{ margin: 0 }}>
+                광고업체정보설정에 등록된 업체를 고르면 초안·글에 반영됩니다.
+              </p>
+            </div>
+            {vendorIds.length ? (
+              <ul className="vendor-pick-chips blog-ai-vendor-chips">
+                {vendorIds.map((id, index) => {
+                  const row = vendorCatalog.find((item) => item.id === id);
+                  const label = vendorLabels[id] || row?.name || (index === 0 ? vendorName : "") || id;
+                  return (
+                    <li key={id}>
+                      <b>{index + 1}</b>
+                      <span className="blog-ai-vendor-name">{label}</span>
+                      <button
+                        className="blog-ai-remove"
+                        type="button"
+                        onClick={() => {
+                          const next = vendorIds.filter((item) => item !== id);
+                          setVendorIds(next);
+                          setVendorId(next[0] || "");
+                          setVendorLabels((prev) => {
+                            const copy = { ...prev };
+                            delete copy[id];
+                            return copy;
+                          });
+                          if (!next.length) {
+                            setVendorName("");
+                            setVendorPhone("");
+                            setVendorWebsite("");
+                            setVendorKakao("");
+                            setVendorBizNo("");
+                            setVendorAddress("");
+                          } else if (index === 0) {
+                            const first = next[0];
+                            setVendorName(vendorLabels[first] || vendorCatalog.find((v) => v.id === first)?.name || "");
+                          }
+                        }}
+                      >
+                        빼기
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
+
+            <label>이미지 웹 폴더 (선택)</label>
+            <div className="blog-ai-folder-row">
+              <input
+                value={imageFolderUrl}
+                onChange={(e) => setImageFolderUrl(e.target.value)}
+                placeholder="https://image.cattery.co.kr/dalma/"
+                disabled={folderBusy}
+              />
+              <button
+                type="button"
+                className="blog-ai-folder-btn"
+                disabled={folderBusy}
+                onClick={() => void importFolderImages()}
+              >
+                {folderBusy ? "가져오는 중…" : "폴더에서 가져오기"}
+              </button>
+            </div>
+            <p className="field-hint" style={{ marginTop: 0 }}>
+              사이트 이미지 폴더 주소를 넣으면 그 안의 사진을 가져와 대표·본문 이미지로 씁니다.
+            </p>
+            {coverImage ? (
+              <div className="blog-ai-cover-row">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img className="cover-preview" src={coverImage} alt="대표 이미지" />
+                <button
+                  type="button"
+                  className="blog-ai-remove"
+                  onClick={() => {
+                    setCoverImage("");
+                    setExtraImages([]);
+                  }}
+                >
+                  이미지 비우기
+                </button>
+              </div>
+            ) : null}
+            {extraImages.length > 0 ? (
+              <div className="blog-ai-thumbs">
+                {extraImages.map((image, index) =>
+                  image.url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img key={`${image.url}-${index}`} src={image.url} alt={`추가 ${index + 1}`} />
+                  ) : null
+                )}
+              </div>
+            ) : null}
+          </div>
+        </details>
+
+        <div className="blog-ai-generate-row">
+          <button
+            className="blog-compose-publish blog-ai-generate"
+            type="button"
+            onClick={() => runGenerate()}
+            disabled={genBusy}
+          >
+            {genBusy ? "작성 중…" : "초안 생성"}
+          </button>
+          {gateNote ? <p className="blog-compose-msg">{gateNote}</p> : null}
+          {error ? <p className="blog-compose-msg is-error">{error}</p> : null}
+          {message ? <p className="blog-compose-msg is-ok">{message}</p> : null}
+        </div>
+
+        <details className="blog-ai-more" open={Boolean(bodyHtml || title)}>
+          <summary>
+            <span className="blog-ai-summary-title">초안 결과</span>
+            <span className="blog-ai-summary-hint">생성 후 제목·본문을 확인하고 발행하세요.</span>
+          </summary>
+          <div className="blog-ai-more-body">
+            <label>제목</label>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="초안 생성 후 자동으로 채워집니다"
+            />
+            <label>본문</label>
+            <textarea
+              value={bodyHtml}
+              onChange={(e) => setBodyHtml(e.target.value)}
+              placeholder="초안 생성 후 여기에 본문이 들어옵니다. 필요하면 수정하세요."
+            />
+            <label>상태</label>
+            <select value={status} onChange={(e) => setStatus(e.target.value as PostStatus)}>
+              <option value="draft">초안</option>
+              <option value="published">발행</option>
+            </select>
+            <div className="admin-actions">
+              <button className="btn btn-primary" type="button" onClick={save} disabled={busy || !bodyHtml.trim()}>
+                {busy ? "저장 중…" : status === "published" ? "발행하기" : "초안 저장"}
+              </button>
+            </div>
+          </div>
+        </details>
+      </div>
+    );
   }
 
   return (
@@ -669,8 +1010,14 @@ export function PostEditor({ post }: { post?: Post }) {
             {genBusy ? "작성 중…" : "초안 생성"}
           </button>
         </div>
+        {gateNote ? (
+          <p className="field-hint" style={{ marginTop: 8 }}>
+            생성 결과: {gateNote}
+          </p>
+        ) : null}
         <p style={{ color: "#64748b", fontSize: 12 }}>
-          API 키는 <a href="/admin/settings">설정</a>에서 저장합니다.
+          API 키는 <a href="/admin/settings">설정</a>에서 저장합니다. PASS/WARN은 초안을 넣고, HOLD는 자동으로 넣지
+          않습니다.
         </p>
       </div>
     </div>

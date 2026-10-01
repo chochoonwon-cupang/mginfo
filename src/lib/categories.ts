@@ -1,4 +1,5 @@
 import type { Category, Settings } from "./types";
+import { fallbackSiteTagline, isBlandSiteTagline } from "./site-tagline";
 import { slugify } from "./slug";
 
 export const CATEGORY_COLORS = [
@@ -78,8 +79,9 @@ export function displaySiteName(name?: string) {
 
 export function siteBrand(settings?: Pick<Settings, "siteName" | "siteTagline"> | null) {
   const name = displaySiteName(settings?.siteName);
-  const tagline = String(settings?.siteTagline || "").trim() || SITE.tagline;
-  const description = `${name}. ${tagline}`;
+  const raw = String(settings?.siteTagline || "").trim();
+  const tagline = isBlandSiteTagline(raw) ? fallbackSiteTagline(name, "siteBrand") : raw || SITE.tagline;
+  const description = tagline.startsWith(name) ? tagline : `${name}. ${tagline}`;
   return { name, tagline, description };
 }
 

@@ -11,35 +11,34 @@ function VerifiedHelpBody() {
   return (
     <>
       <p>
-        <strong>이건 뭔가요?</strong> 광고업체의 <em>검증된 확장 정보</em>입니다. 상호·전화·주소는 「광고업체정보설정」에
-        두고, 여기에는 영업시간·Facts·개체(분양)·시공 사례(철거)만 넣습니다. Gemini가 이 내용을 만들어내지 않습니다.
+        <strong>이건 뭔가요?</strong> 광고업체의 <em>검증된 확장 정보</em>입니다. 상호·전화·주소는
+        「광고업체정보설정」에 두고, 여기에는 영업시간·사실·개체(분양)·시공 사례(철거)만 넣습니다. AI가 이
+        내용을 만들어내지 않습니다.
       </p>
       <p>
-        <strong>왜 필요한가요?</strong> 대량발행(Planner→Writer)이 매장정보·방문안내·실제 개체·시공 사례 같은{" "}
-        <em>코드 블록</em>을 글에 붙이려면 여기 데이터가 있어야 합니다. 없으면 그 블록은 빠집니다.
+        <strong>왜 필요한가요?</strong> 대량발행이 매장정보·방문안내·실제 개체·시공 사례 같은{" "}
+        <em>고정 블록</em>을 글에 붙이려면 여기 데이터가 있어야 합니다. 없으면 그 블록은 빠집니다.
       </p>
       <ol>
+        <li>먼저 「광고업체정보설정」에서 업체(상호·전화·주소)를 등록합니다.</li>
         <li>
-          먼저 「광고업체정보설정」에서 업체(상호·전화·주소)를 등록합니다.
-        </li>
-        <li>
-          이 화면에서 업체를 고른 뒤 <code>industryId</code>를 넣습니다.
+          이 화면에서 업체를 고른 뒤 업종을 선택합니다.
           <br />
-          분양: <code>ind-dog-adoption</code> · 철거: <code>ind-demolition</code>
+          분양: 강아지 분양 · 철거: 철거
         </li>
-        <li>영업시간·상담 방식·방문 정책·서비스·Facts를 채우고 「프로필 저장」합니다.</li>
+        <li>영업시간·상담 방식·방문 정책·서비스·사실을 채우고 「프로필 저장」합니다.</li>
         <li>
-          Facts는 한 줄에 <code>key|label|value</code> 형식입니다.
+          사실은 한 줄에 <code>키|이름|값</code> 형식입니다.
           <br />
           예: <code>years_in_business|운영 경력|20년 이상</code>
         </li>
         <li>분양 사이트면 「실제 개체」에 품종을 넣어 추가합니다. (키워드 품종과 맞아야 글에 나옵니다)</li>
         <li>철거 사이트면 「시공 사례」에 제목·유형·지역을 넣어 추가합니다.</li>
-        <li>대량발행 그룹에 그 업체를 연결해 두면, 크론/수동 생성 때 Verified 블록이 자동으로 붙습니다.</li>
+        <li>대량발행 그룹에 그 업체를 연결해 두면, 자동/수동 생성 때 검증 블록이 자동으로 붙습니다.</li>
       </ol>
       <p>
         <strong>주의</strong> · 허위 전화·주소·개체·사례를 넣지 마세요. · 상호/전화는 여기가 아니라
-        「광고업체정보설정」에 있어야 매장 블록이 됩니다. · 개체는 추가 시 항상 available 상태입니다.
+        「광고업체정보설정」에 있어야 매장 블록이 됩니다. · 개체는 추가 시 항상 「분양 가능」 상태입니다.
       </p>
     </>
   );
@@ -78,7 +77,7 @@ export function VendorVerifiedAdmin() {
       return;
     }
     if (!pRes.ok) {
-      setError(pData.error || "Verified 데이터 실패");
+      setError(pData.error || "업체 검증 데이터 실패");
       return;
     }
     const list = (vData.vendors || []) as AdVendor[];
@@ -168,11 +167,11 @@ export function VendorVerifiedAdmin() {
       <div className="admin-card">
         <div className="admin-card-head">
           <div>
-            <AdminTitleWithHelp title="Verified 업체 데이터" helpTitle="Verified 업체데이터 사용법">
+            <AdminTitleWithHelp title="업체 검증 데이터" helpTitle="업체 검증 데이터 사용법">
               <VerifiedHelpBody />
             </AdminTitleWithHelp>
             <p className="admin-muted">
-              상호·전화·주소는 「광고업체정보설정」을 씁니다. 여기서는 영업시간·Facts·개체·시공 사례만 확장합니다.
+              상호·전화·주소는 「광고업체정보설정」을 씁니다. 여기서는 영업시간·사실·개체·시공 사례만 확장합니다.
               노란색 ? 를 누르면 자세한 사용법이 나옵니다.
             </p>
           </div>
@@ -200,17 +199,17 @@ export function VendorVerifiedAdmin() {
 
       <div className="admin-card">
         <div className="admin-card-head">
-          <h2>기본 Verified 확장</h2>
+          <h2>기본 검증 확장</h2>
         </div>
         <div className="admin-form">
           <div className="admin-form-grid">
             <label>
-              industryId
-              <input
-                value={industryId}
-                onChange={(e) => setIndustryId(e.target.value)}
-                placeholder="ind-dog-adoption / ind-demolition"
-              />
+              업종
+              <select value={industryId} onChange={(e) => setIndustryId(e.target.value)}>
+                <option value="">선택</option>
+                <option value="ind-dog-adoption">강아지 분양</option>
+                <option value="ind-demolition">철거</option>
+              </select>
             </label>
             <label>
               영업시간
@@ -242,7 +241,7 @@ export function VendorVerifiedAdmin() {
             <input value={servicesText} onChange={(e) => setServicesText(e.target.value)} />
           </label>
           <label>
-            Verified Facts (한 줄에 key|label|value)
+            검증 사실 (한 줄에 키|이름|값)
             <textarea
               rows={4}
               value={factsText}
@@ -357,7 +356,17 @@ export function VendorVerifiedAdmin() {
                   <td data-label="성별">{a.sex || "—"}</td>
                   <td data-label="생년월일">{a.birthDate || "—"}</td>
                   <td data-label="상태">
-                    <span className="badge badge-on">{a.status}</span>
+                    <span className="badge badge-on">
+                      {a.status === "available"
+                        ? "분양 가능"
+                        : a.status === "reserved"
+                          ? "예약됨"
+                          : a.status === "completed"
+                            ? "분양 완료"
+                            : a.status === "inactive"
+                              ? "비활성"
+                              : a.status}
+                    </span>
                   </td>
                   <td data-label="관리" className="admin-table-actions">
                     <button

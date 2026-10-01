@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { checkMasterPassword } from "@/lib/auth";
+import { parseAdVendorSnapshots, upsertAdVendors } from "@/lib/ad-vendors";
 import { bannedContentError, unpublishBannedPosts } from "@/lib/banned-keywords";
 import { FREE_BOARD_SLUG, withFreeBoard } from "@/lib/categories";
 import { getSettings, updateStore } from "@/lib/db";
@@ -70,6 +71,10 @@ export async function POST(request: Request) {
       const banned = bannedContentError(store.settings.publishBannedKeywords, title, String(body.focusKeyword || ""), String(body.excerpt || ""), String(body.bodyHtml || ""));
       if (banned) throw new Error(banned);
       store.categories = withFreeBoard(store.categories);
+      const hubVendors = parseAdVendorSnapshots(body.adVendors ?? body.adVendor);
+      if (hubVendors.length) {
+        store.adVendors = upsertAdVendors(store.adVendors || [], hubVendors);
+      }
       if (hubCampaignId && alreadyHasCampaign(store.posts, hubCampaignId)) {
         duplicate = true;
         post = store.posts.find((row) => row.hubCampaignId === hubCampaignId) || null;
@@ -81,6 +86,7 @@ export async function POST(request: Request) {
     if (!post) return NextResponse.json({ error: "글을 만들지 못했습니다." }, { status: 500 });
     if (!duplicate) {
       await notifyPostIndexed(post.slug);
+      revalidatePublicSite();
     }
     return NextResponse.json({ ok: true, duplicate, post });
   } catch (err) {

@@ -13,6 +13,11 @@ function factValue(value: string | number | boolean | string[]): string {
   return String(value);
 }
 
+function infoRow(label: string, value: string): string {
+  if (!value.trim()) return "";
+  return `<div class="verified-info-row"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
+}
+
 /** Only http(s) absolute URLs — never invent or pass through javascript: etc. */
 export function isSafeMediaUrl(url: string): boolean {
   const raw = String(url || "").trim();
@@ -32,11 +37,11 @@ function animalAlt(animal: Animal, companyName?: string): string {
 /** Verified-only animal card. No Gemini copy. Hide empty fields. */
 export function renderAnimalCard(animal: Animal, companyName?: string): string {
   const title = esc(animal.name || animal.breed);
-  const bits = [
-    animal.breed && `품종 ${esc(animal.breed)}`,
-    animal.sex && `성별 ${esc(animal.sex)}`,
-    animal.birthDate && `생년월일 ${esc(animal.birthDate)}`,
-    animal.color && `모색 ${esc(animal.color)}`,
+  const chips = [
+    animal.breed && `<span class="verified-chip">${esc(animal.breed)}</span>`,
+    animal.sex && `<span class="verified-chip">${esc(animal.sex)}</span>`,
+    animal.birthDate && `<span class="verified-chip">${esc(animal.birthDate)}</span>`,
+    animal.color && `<span class="verified-chip">${esc(animal.color)}</span>`,
   ].filter(Boolean);
   const defaultAlt = animalAlt(animal, companyName);
   const media = (animal.media || [])
@@ -52,32 +57,40 @@ export function renderAnimalCard(animal: Animal, companyName?: string): string {
       ? `<p class="verified-animal-desc">${esc(animal.description.trim())}</p>`
       : "";
   return `<article class="verified-animal" data-animal-id="${esc(animal.id)}">
-  <h3>${title}</h3>
-  ${bits.length ? `<p>${bits.join(" · ")}</p>` : ""}
-  ${desc}
-  ${media}
+  ${media ? `<div class="verified-animal-gallery">${media}</div>` : ""}
+  <div class="verified-animal-body">
+    <h3>${title}</h3>
+    ${chips.length ? `<div class="verified-chip-row">${chips.join("")}</div>` : ""}
+    ${desc}
+  </div>
 </article>`;
 }
 
 function renderProjectCard(project: ProjectExample): string {
-  const bits = [
-    project.projectType && esc(project.projectType),
-    project.region && esc(project.region),
-    project.completedAt && `완료 ${esc(project.completedAt.slice(0, 10))}`,
+  const chips = [
+    project.projectType && `<span class="verified-chip">${esc(project.projectType)}</span>`,
+    project.region && `<span class="verified-chip">${esc(project.region)}</span>`,
+    project.completedAt && `<span class="verified-chip">${esc(project.completedAt.slice(0, 10))}</span>`,
   ].filter(Boolean);
   const media = (project.media || [])
     .filter((m) => isSafeMediaUrl(m.url))
     .slice(0, 3)
-    .map(
-      (m) =>
-        `<figure class="verified-project-media"><img src="${esc(m.url)}" alt="${esc(m.alt || project.title)}" width="800" height="600" loading="lazy" decoding="async" /></figure>`
-    )
+    .map((m) => {
+      const alt = esc(m.alt?.trim() || project.title);
+      return `<figure class="verified-project-media"><img src="${esc(m.url)}" alt="${alt}" width="800" height="600" loading="lazy" decoding="async" /></figure>`;
+    })
     .join("");
-  return `<article class="verified-project">
-  <h3>${esc(project.title)}</h3>
-  ${bits.length ? `<p>${bits.join(" · ")}</p>` : ""}
-  ${project.description ? `<p>${esc(project.description)}</p>` : ""}
-  ${media}
+  const desc =
+    project.description && String(project.description).trim()
+      ? `<p class="verified-project-desc">${esc(project.description.trim())}</p>`
+      : "";
+  return `<article class="verified-project" data-project-id="${esc(project.id)}">
+  ${media ? `<div class="verified-project-gallery">${media}</div>` : ""}
+  <div class="verified-project-body">
+    <h3>${esc(project.title)}</h3>
+    ${chips.length ? `<div class="verified-chip-row">${chips.join("")}</div>` : ""}
+    ${desc}
+  </div>
 </article>`;
 }
 
@@ -108,49 +121,53 @@ ${cards}
     case "store_information":
     case "company_information": {
       const rows: string[] = [];
-      rows.push(`<li><strong>상호</strong> ${esc(view.companyName)}</li>`);
-      if (view.address) rows.push(`<li><strong>주소</strong> ${esc(view.address)}</li>`);
-      if (view.phone) rows.push(`<li><strong>전화</strong> ${esc(view.phone)}</li>`);
-      if (view.website) rows.push(`<li><strong>웹사이트</strong> ${esc(view.website)}</li>`);
+      rows.push(infoRow("상호", view.companyName));
+      if (view.address) rows.push(infoRow("주소", view.address));
+      if (view.phone) rows.push(infoRow("전화", view.phone));
+      if (view.website) rows.push(infoRow("웹사이트", view.website));
       if (view.services.length) {
-        rows.push(`<li><strong>서비스</strong> ${esc(view.services.join(", "))}</li>`);
+        rows.push(infoRow("서비스", view.services.join(", ")));
+      } else {
+        const serviceTypes = view.industryData?.serviceTypes;
+        if (Array.isArray(serviceTypes) && serviceTypes.length) {
+          rows.push(infoRow("서비스", serviceTypes.map(String).join(", ")));
+        }
       }
       if (view.serviceAreas.length) {
-        rows.push(`<li><strong>서비스 지역</strong> ${esc(view.serviceAreas.join(", "))}</li>`);
+        rows.push(infoRow("서비스 지역", view.serviceAreas.join(", ")));
       }
       for (const fact of view.verifiedFacts.slice(0, 8)) {
-        rows.push(`<li><strong>${esc(fact.label)}</strong> ${esc(factValue(fact.value))}</li>`);
+        rows.push(infoRow(fact.label, factValue(fact.value)));
       }
-      // businessHours intentionally omitted — belongs in visit_information
+      const body = rows.filter(Boolean).join("\n");
+      if (!body) return null;
       return `<div class="verified-block verified-store" data-block="${esc(blockKey)}">
-<ul>
-${rows.join("\n")}
-</ul>
+<dl class="verified-info-list">
+${body}
+</dl>
 </div>`;
     }
     case "visit_information": {
       const rows: string[] = [];
-      if (view.businessHours) rows.push(`<li><strong>영업시간</strong> ${esc(view.businessHours)}</li>`);
-      if (view.consultationMethod) {
-        rows.push(`<li><strong>상담</strong> ${esc(view.consultationMethod)}</li>`);
-      }
-      if (view.visitPolicy) rows.push(`<li><strong>방문</strong> ${esc(view.visitPolicy)}</li>`);
+      if (view.businessHours) rows.push(infoRow("영업시간", view.businessHours));
+      if (view.consultationMethod) rows.push(infoRow("상담", view.consultationMethod));
+      if (view.visitPolicy) rows.push(infoRow("방문", view.visitPolicy));
       const parking = view.industryData?.parking;
       if (parking != null && String(parking).trim()) {
-        rows.push(`<li><strong>주차</strong> ${esc(String(parking).trim())}</li>`);
+        rows.push(infoRow("주차", String(parking).trim()));
       }
-      // Do not repeat address/phone — those stay in store_information
-      if (!rows.length) return null;
+      const body = rows.filter(Boolean).join("\n");
+      if (!body) return null;
       return `<div class="verified-block verified-visit" data-block="${esc(blockKey)}">
-<ul>
-${rows.join("\n")}
-</ul>
+<dl class="verified-info-list">
+${body}
+</dl>
 </div>`;
     }
     case "consultation": {
       if (!view.consultationMethod) return null;
       return `<div class="verified-block verified-consultation" data-block="${esc(blockKey)}">
-<p>${esc(view.consultationMethod)}</p>
+<p class="verified-consult-text">${esc(view.consultationMethod)}</p>
 </div>`;
     }
     case "project_examples": {
@@ -167,5 +184,5 @@ ${pack.projects.map(renderProjectCard).join("\n")}
 /** Prefer section.heading from plan; never let AI rewrite verified body. */
 export function wrapVerifiedSection(heading: string, innerHtml: string): string {
   const h = esc(heading);
-  return `<h2>${h}</h2>\n${innerHtml}`;
+  return `<h2 class="verified-section-title">${h}</h2>\n${innerHtml}`;
 }

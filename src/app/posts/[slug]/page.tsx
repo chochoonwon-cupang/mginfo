@@ -24,12 +24,13 @@ import { buildBreadcrumbJsonLd, buildFaqPageJsonLd } from "@/lib/site-jsonld";
 import { ArticlePhoto } from "@/components/ArticlePhoto";
 import { EngagementBar } from "@/components/EngagementBar";
 import { resolveRegionContext } from "@/lib/region-intro";
-import { hasPublicFactBlock, buildPublicFactSection } from "@/lib/public-facts";
+import { buildPublicFactSection } from "@/lib/public-facts";
+import { stripFactBlocks } from "@/lib/body-uniqueness";
 import { regionHubPath } from "@/lib/region-hub";
 import { PUBLISH_DISCLAIMER } from "@/lib/publish-disclaimer";
 import { placeInlineImages } from "@/lib/post-images";
 import { hasAnyVendorSticky, liveVendorView } from "@/lib/vendor";
-import { listingVendorsForPost, pickVisibleVendors } from "@/lib/vendor-ads";
+import { listingVendorsOrPostFallback, pickVisibleVendors } from "@/lib/vendor-ads";
 import { articleShowRecruit, resolveVendorRegisterUrl, slotCountForCategory } from "@/lib/category-vendor-ads";
 
 export const dynamic = "force-dynamic";
@@ -113,14 +114,15 @@ export default async function PostPage({ params }: { params: Promise<{ slug: str
     slug: post.slug,
   });
   const extras = post.extraImages || [];
-  const placed = placeInlineImages(post.bodyHtml, extras, keyword, { hasCover: Boolean(post.coverImage) });
+  const bodyHtml = stripFactBlocks(post.bodyHtml);
+  const placed = placeInlineImages(bodyHtml, extras, keyword, { hasCover: Boolean(post.coverImage) });
   const liveVendor = liveVendorView(
     post,
     post.vendorId ? vendors.find((row) => row.id === post.vendorId) : undefined
   );
   const slotCount = slotCountForCategory(cat);
   const listingVendors = pickVisibleVendors(
-    listingVendorsForPost(post, vendors, cat),
+    listingVendorsOrPostFallback(post, vendors, cat),
     slotCount,
     Math.floor(Math.random() * 0x7fffffff) + 1
   );
@@ -135,7 +137,8 @@ export default async function PostPage({ params }: { params: Promise<{ slug: str
     vendorKakao: liveVendor.vendorKakao,
     vendorPlaceUrl: liveVendor.vendorPlaceUrl,
   };
-  const showPageFacts = Boolean(publicFacts) && !hasPublicFactBlock(post.bodyHtml);
+  const showPageFacts = Boolean(publicFacts);
+  const showGeoExtras = Boolean(geo && (geo.regionInfo || geo.nearbyAreas.length > 0 || geo.nearbyStations.length > 0));
   const crumbs = [
     { name: "홈", path: "/" },
     { name: cat?.name || "글", path: `/category/${post.category}` },
@@ -230,81 +233,91 @@ export default async function PostPage({ params }: { params: Promise<{ slug: str
             ))}
           </div>
         )}
-        {showPageFacts && publicFacts ? (
-          <section className="article-facts">
-            <h2>{publicFacts.heading}</h2>
-            <p>{publicFacts.lead}</p>
-            <table>
-              <tbody>
-                {publicFacts.rows.map((row) => (
-                  <tr key={row.label}>
-                    <th scope="row">{row.label}</th>
-                    <td>{row.value}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <p className="article-facts-note">{publicFacts.note}</p>
-          </section>
-        ) : null}
         <p className="article-disclaimer">{PUBLISH_DISCLAIMER}</p>
-        {related.length > 0 && (
-          <div className="related-posts">
-            {related.map((cluster) => (
-              <div className="related-cluster" key={cluster.heading}>
-                <h2>{cluster.heading}</h2>
-                <ul>
-                  {cluster.posts.map((item) => (
-                    <li key={item.id}>
-                      <Link href={`/posts/${item.slug}`}>{postLinkLabel(item)}</Link>
-                    </li>
+        {related.length > 0 || showPageFacts || showGeoExtras ? (
+          <details className="article-extras">
+            <summary>
+              <span className="article-extras-mark" aria-hidden="true" />
+              지역·관련 참고 자료
+            </summary>
+            <div className="article-extras-body">
+              {showPageFacts && publicFacts ? (
+                <section className="article-facts">
+                  <h2>{publicFacts.heading}</h2>
+                  <p>{publicFacts.lead}</p>
+                  <table>
+                    <tbody>
+                      {publicFacts.rows.map((row) => (
+                        <tr key={row.label}>
+                          <th scope="row">{row.label}</th>
+                          <td>{row.value}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="article-facts-note">{publicFacts.note}</p>
+                </section>
+              ) : null}
+              {related.length > 0 ? (
+                <div className="related-posts">
+                  {related.map((cluster) => (
+                    <div className="related-cluster" key={cluster.heading}>
+                      <h2>{cluster.heading}</h2>
+                      <ul>
+                        {cluster.posts.map((item) => (
+                          <li key={item.id}>
+                            <Link href={`/posts/${item.slug}`}>{postLinkLabel(item)}</Link>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   ))}
-                </ul>
-              </div>
-            ))}
-            {cat ? (
-              <p className="related-hub">
-                <Link href={`/category/${cat.slug}`}>
-                  {post.focusKeyword ? `${post.focusKeyword} · ${cat.name} 더 보기` : `${cat.name} 전체 글`}
-                </Link>
-                {geo?.place ? (
-                  <>
-                    {" · "}
-                    <Link href={regionHubPath(geo.place)}>{geo.place} 지역 글</Link>
-                  </>
-                ) : null}
-              </p>
-            ) : null}
-          </div>
-        )}
-        {geo && (geo.regionInfo || geo.nearbyAreas.length > 0 || geo.nearbyStations.length > 0) ? (
-          <section className="article-geo">
-            {geo.regionInfo ? <p className="article-region">{geo.regionInfo}</p> : null}
-            {geo.nearbyAreas.length > 0 ? (
-              <div>
-                <h2>{geo.nearbyHeading}</h2>
-                <p>{geo.nearbyLead}</p>
-                <ul>
-                  {geo.nearbyAreas.map((area, index) => (
-                    <li key={area}>
-                      <Link href={regionHubPath(area)}>{geo.nearbyLabels[index] || `${area} ${keyword}`}</Link>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {geo.nearbyStations.length > 0 ? (
-              <div>
-                <h2>{geo.stationHeading}</h2>
-                <p>{geo.stationLead}</p>
-                <ul>
-                  {geo.nearbyStations.map((station, index) => (
-                    <li key={station}>{geo.stationLabels[index] || `${station} ${keyword}`}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </section>
+                  {cat ? (
+                    <p className="related-hub">
+                      <Link href={`/category/${cat.slug}`}>
+                        {post.focusKeyword ? `${post.focusKeyword} · ${cat.name} 더 보기` : `${cat.name} 전체 글`}
+                      </Link>
+                      {geo?.place ? (
+                        <>
+                          {" · "}
+                          <Link href={regionHubPath(geo.place)}>{geo.place} 지역 글</Link>
+                        </>
+                      ) : null}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+              {showGeoExtras && geo ? (
+                <section className="article-geo">
+                  {geo.regionInfo ? <p className="article-region">{geo.regionInfo}</p> : null}
+                  {geo.nearbyAreas.length > 0 ? (
+                    <div>
+                      <h2>{geo.nearbyHeading}</h2>
+                      <p>{geo.nearbyLead}</p>
+                      <ul>
+                        {geo.nearbyAreas.map((area, index) => (
+                          <li key={area}>
+                            <Link href={regionHubPath(area)}>{geo.nearbyLabels[index] || `${area} ${keyword}`}</Link>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {geo.nearbyStations.length > 0 ? (
+                    <div>
+                      <h2>{geo.stationHeading}</h2>
+                      <p>{geo.stationLead}</p>
+                      <ul>
+                        {geo.nearbyStations.map((station, index) => (
+                          <li key={station}>{geo.stationLabels[index] || `${station} ${keyword}`}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+            </div>
+          </details>
         ) : null}
       </article>
     </SiteFrame>

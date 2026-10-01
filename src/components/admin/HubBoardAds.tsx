@@ -6,6 +6,10 @@ import { VendorPicker } from "@/components/admin/VendorPicker";
 import { MultiFileButton } from "@/components/admin/MultiFileButton";
 import { pickImageFiles, prepareUploadImage } from "@/lib/prepare-upload-image";
 import { mergeImageUrls } from "@/lib/image-pool";
+import { defaultHubBoardTemplateId, listHubBoardTemplates } from "@/lib/hub-board-templates/registry";
+
+const HUB_TEMPLATES = listHubBoardTemplates();
+const DEFAULT_TEMPLATE_ID = defaultHubBoardTemplateId();
 
 type BoardSite = { id: string; siteName: string; domain: string; apexDomain: string; concept?: string };
 
@@ -44,8 +48,12 @@ type Campaign = {
   vendorKakao?: string;
   vendorId?: string;
   writingStyle?: string;
+  contentMode?: "gemini" | "template";
+  templateId?: string;
   imagePool?: string[];
   imageFolderUrl?: string;
+  imageCountMin?: number;
+  imageCountMax?: number;
   extraPrompt?: string;
   dailyLimit: number;
   siteIds: string[];
@@ -74,8 +82,12 @@ function emptyCampaign(siteIds: string[]): Campaign {
     vendorKakao: "",
     vendorId: "",
     writingStyle: "random",
+    contentMode: "gemini",
+    templateId: DEFAULT_TEMPLATE_ID,
     imagePool: [],
     imageFolderUrl: "",
+    imageCountMin: 1,
+    imageCountMax: 3,
     extraPrompt: "",
     dailyLimit: 100,
     siteIds,
@@ -100,9 +112,13 @@ function campaignSaveBody(campaign: Campaign, extraText = "") {
     youtubeUrl2: campaign.youtubeUrl2,
     imagePool: campaign.imagePool || [],
     imageFolderUrl: campaign.imageFolderUrl || "",
+    imageCountMin: campaign.imageCountMin || 1,
+    imageCountMax: Math.max(campaign.imageCountMin || 1, campaign.imageCountMax || 3),
     extraPrompt: campaign.extraPrompt || "",
     coverImage: (campaign.imagePool || [])[0] || "",
     writingStyle: campaign.writingStyle,
+    contentMode: campaign.contentMode || "gemini",
+    templateId: campaign.contentMode === "template" ? campaign.templateId || DEFAULT_TEMPLATE_ID : campaign.templateId,
     dailyLimit: campaign.dailyLimit,
     siteIds: campaign.siteIds,
     keywords: campaign.keywords,
@@ -516,9 +532,13 @@ export function HubBoardAds() {
       {
         ...emptyCampaign(siteIds),
         writingStyle: form.writingStyle,
+        contentMode: form.contentMode || "gemini",
+        templateId: form.templateId || DEFAULT_TEMPLATE_ID,
         extraPrompt: form.extraPrompt,
         imagePool: form.imagePool || [],
         imageFolderUrl: form.imageFolderUrl || "",
+        imageCountMin: form.imageCountMin || 1,
+        imageCountMax: form.imageCountMax || 3,
         schedule: { ...form.schedule },
         vendorRecruitSlot: Boolean(form.vendorRecruitSlot),
       },
@@ -616,9 +636,13 @@ export function HubBoardAds() {
           youtubeUrl2: form.youtubeUrl2,
           imagePool: form.imagePool || [],
           imageFolderUrl: form.imageFolderUrl || "",
+          imageCountMin: form.imageCountMin || 1,
+          imageCountMax: form.imageCountMax || 3,
           extraPrompt: form.extraPrompt || "",
           coverImage: (form.imagePool || [])[0] || "",
           writingStyle: form.writingStyle,
+          contentMode: form.contentMode || "gemini",
+          templateId: form.contentMode === "template" ? form.templateId || DEFAULT_TEMPLATE_ID : form.templateId,
           dailyLimit: form.dailyLimit,
           siteIds: form.siteIds,
           keywords: form.keywords,
@@ -951,8 +975,41 @@ export function HubBoardAds() {
         </div>
         <p className="field-hint">
           올린 사진이 자유게시판 광고 글의 대표 이미지와 본문 사진으로 쓰입니다. 폴더는 확장자·번호를 적을 필요 없이
-          주소만 넣으면, 목록이 열려 있거나 01.webp처럼 번호 파일이면 알아서 가져옵니다.
+          주소만 넣으면, 목록이 열려 있거나 01.webp처럼 번호 파일이면 알아서 가져옵니다. 제미나이·양식 공통으로
+          아래 최소~최대 장수 안에서 랜덤으로 들어갑니다.
         </p>
+        <div className="bulk-group-grid">
+          <label>
+            사진 최소
+            <input
+              type="number"
+              min={1}
+              max={7}
+              value={form.imageCountMin || 1}
+              onChange={(e) => {
+                const min = Math.max(1, Math.min(7, Number(e.target.value) || 1));
+                const max = Math.max(min, form.imageCountMax || 3);
+                setForm({ ...form, imageCountMin: min, imageCountMax: Math.min(7, max) });
+              }}
+              disabled={uploading || folderBusy}
+            />
+          </label>
+          <label>
+            사진 최대
+            <input
+              type="number"
+              min={1}
+              max={7}
+              value={form.imageCountMax || 3}
+              onChange={(e) => {
+                const max = Math.max(1, Math.min(7, Number(e.target.value) || 3));
+                const min = Math.min(max, form.imageCountMin || 1);
+                setForm({ ...form, imageCountMin: min, imageCountMax: max });
+              }}
+              disabled={uploading || folderBusy}
+            />
+          </label>
+        </div>
         {(form.imagePool || []).length ? (
           <ul className="bulk-thumbs">
             {(form.imagePool || []).map((url) => (
@@ -998,15 +1055,48 @@ export function HubBoardAds() {
             />
           </label>
           <label>
-            글방향
-            <select value={form.writingStyle || "random"} onChange={(e) => setForm({ ...form, writingStyle: e.target.value })}>
-              {ARTICLE_STYLE_OPTIONS.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
+            작성 방식
+            <select
+              value={form.contentMode || "gemini"}
+              onChange={(e) => {
+                const contentMode = e.target.value === "template" ? "template" : "gemini";
+                setForm({
+                  ...form,
+                  contentMode,
+                  templateId: contentMode === "template" ? form.templateId || DEFAULT_TEMPLATE_ID : form.templateId,
+                });
+              }}
+            >
+              <option value="gemini">제미나이</option>
+              <option value="template">양식 (제미나이 없음)</option>
             </select>
           </label>
+          {form.contentMode === "template" ? (
+            <label>
+              양식
+              <select
+                value={form.templateId || DEFAULT_TEMPLATE_ID}
+                onChange={(e) => setForm({ ...form, templateId: e.target.value })}
+              >
+                {HUB_TEMPLATES.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <label>
+              글방향
+              <select value={form.writingStyle || "random"} onChange={(e) => setForm({ ...form, writingStyle: e.target.value })}>
+                {ARTICLE_STYLE_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label>
             매일 자동발행
             <select
@@ -1049,6 +1139,9 @@ export function HubBoardAds() {
         </div>
         <p className="field-hint">
           사이트 전체에 대한 하루 총량입니다. {perSiteHint}. 9999면 사실상 무제한.
+          {form.contentMode === "template"
+            ? " 양식 모드는 제미나이 없이 지역·키워드·업체를 뼈대에 넣어 씁니다. 키워드는 「부천 골든두들분양」처럼 지역+주제를 직접 넣으세요."
+            : ""}
         </p>
 
         <label>대량 키워드 (줄 또는 쉼표)</label>
@@ -1056,7 +1149,11 @@ export function HubBoardAds() {
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={8}
-          placeholder={"부천 애견미용\n인천 펫샵 추천\n강아지 호텔"}
+          placeholder={
+            form.contentMode === "template"
+              ? "부천 골든두들분양\n인천 골든두들분양\n수원 골든두들분양"
+              : "부천 애견미용\n인천 펫샵 추천\n강아지 호텔"
+          }
         />
 
         <div className="hub-board-sites">

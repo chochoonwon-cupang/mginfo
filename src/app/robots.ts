@@ -1,21 +1,22 @@
 import type { MetadataRoute } from "next";
-import { SITE_ORIGIN } from "@/lib/seo";
+import { resolvePublicOrigin } from "@/lib/main-landing/resolve-origin";
 
-export default function robots(): MetadataRoute.Robots {
+export default async function robots(): Promise<MetadataRoute.Robots> {
+  const origin = await resolvePublicOrigin();
   return {
     rules: [
       {
         userAgent: "*",
         allow: "/",
-        disallow: ["/admin", "/admin/", "/api/", "/api"],
+        disallow: ["/admin", "/admin/", "/api/", "/api", "/dev/"],
       },
       {
         userAgent: "Yeti",
         allow: "/",
-        disallow: ["/admin", "/api/"],
+        disallow: ["/admin", "/api/", "/dev/"],
       },
     ],
-    sitemap: `${SITE_ORIGIN}/sitemap.xml`,
-    host: SITE_ORIGIN,
+    sitemap: `${origin}/sitemap.xml`,
+    host: origin,
   };
 }

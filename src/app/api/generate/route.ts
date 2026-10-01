@@ -3,14 +3,11 @@ import { isAdminSession } from "@/lib/auth";
 import { attachLocalFactBlocks } from "@/lib/article-blocks";
 import { articleStyleLabel, resolveArticleStyle } from "@/lib/article-style";
 import { bannedContentError, collectPublishText } from "@/lib/banned-keywords";
-import { collectRecentBodies } from "@/lib/body-uniqueness";
 import { ensureCategorySlug, getCategory } from "@/lib/categories";
-import { getCategories, getPublishedPosts, getSettings } from "@/lib/db";
-import { generateArticle } from "@/lib/gemini";
-import { DEFAULT_GEMINI_MODEL } from "@/lib/gemini-models";
-import { resolveGeminiNotes } from "@/lib/gemini-notes";
+import { generatePipelineArticle } from "@/lib/content-pipeline";
+import { getAdVendors, getCategories, getSettings, readStore } from "@/lib/db";
 import { extractPlaceName } from "@/lib/region-geo";
-import { collectRecentTitles, withUniqueArticle } from "@/lib/title-uniqueness";
+import type { AdVendor } from "@/lib/types";
 
 export async function POST(request: Request) {
   if (!(await isAdminSession())) {
@@ -22,6 +19,7 @@ export async function POST(request: Request) {
   if (!focusKeyword && !topic) {
     return NextResponse.json({ error: "메인 키워드를 입력하세요." }, { status: 400 });
   }
+  const keyword = focusKeyword || topic;
   const writingStyle = resolveArticleStyle(
     String(body.writingStyle || ""),
     focusKeyword,
@@ -31,7 +29,7 @@ export async function POST(request: Request) {
   const cats = await getCategories();
   const category = ensureCategorySlug(body.category, cats);
   const cat = getCategory(category, cats);
-  const [settings, published] = await Promise.all([getSettings(), getPublishedPosts()]);
+  const [settings, store, vendors] = await Promise.all([getSettings(), readStore(), getAdVendors()]);
   const banned = bannedContentError(
     settings.publishBannedKeywords,
     collectPublishText({
@@ -54,35 +52,60 @@ export async function POST(request: Request) {
     );
   }
 
+  const vendorId = String(body.vendorId || "").trim();
+  const vendor: AdVendor | null =
+    (vendorId && vendors.find((row) => row.id === vendorId)) ||
+    (() => {
+      const name = String(body.vendorName || "").trim();
+      return name ? vendors.find((row) => row.name.trim() === name) || null : null;
+    })();
+
   try {
-    const article = await withUniqueArticle(
-      (nextAvoid) =>
-        generateArticle({
-          topic: topic || focusKeyword,
-          writingStyle,
-          category,
-          categoryName: cat?.name,
-          keywords: String(body.keywords || ""),
-          notes: resolveGeminiNotes(String(body.notes || ""), cat?.geminiNotes),
-          focusKeyword: focusKeyword || topic,
-          region,
-          localNotes: String(body.localNotes || ""),
-          experienceNotes: String(body.experienceNotes || ""),
-          vendorName: String(body.vendorName || ""),
-          writingTone: settings.writingTone,
-          writingPersona: settings.writingPersona,
-          avoidTitles: nextAvoid,
-          apiKey,
-          model: settings.geminiModel || DEFAULT_GEMINI_MODEL,
-        }),
-      collectRecentTitles(published),
-      collectRecentBodies(published),
-      focusKeyword || topic
-    );
+    const article = await generatePipelineArticle({
+      store: {
+        ...store,
+        settings: { ...store.settings, ...settings, geminiApiKey: apiKey },
+      },
+      keyword,
+      category,
+      categoryName: cat?.name,
+      categoryNotes: [String(body.notes || "").trim(), cat?.geminiNotes || ""].filter(Boolean).join("\n\n"),
+      writingStyle,
+      extraPrompt: String(body.experienceNotes || ""),
+      vendorName: String(body.vendorName || vendor?.name || ""),
+      vendorPhone: String(body.vendorPhone || vendor?.phone || ""),
+      vendorWebsite: String(body.vendorWebsite || vendor?.website || ""),
+      vendorKakao: String(body.vendorKakao || vendor?.kakao || ""),
+      vendorId: vendor?.id || vendorId || undefined,
+      industryId: String(body.industryId || "").trim() || undefined,
+      blueprintId: String(body.blueprintId || "").trim() || undefined,
+      vendor,
+      apiKey,
+    });
+
+    const decision = article.generationLog?.publishDecision || "";
+    if (article.generationMode === "held" || decision === "HOLD" || !String(article.bodyHtml || "").trim()) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            article.generationLog?.fallbackReason ||
+            article.generationLog?.errors?.join("; ") ||
+            "PublishGate HOLD — 초안을 자동으로 넣지 않았습니다. 업종·검증 데이터를 확인하세요.",
+          publishGate: decision || "HOLD",
+          generationMode: article.generationMode,
+          generationLog: article.generationLog,
+          industryId: article.industryId,
+          blueprintId: article.blueprintId,
+        },
+        { status: 422 }
+      );
+    }
+
     article.bodyHtml = attachLocalFactBlocks({
       html: article.bodyHtml,
       place: region,
-      keyword: focusKeyword || topic,
+      keyword,
       categoryName: cat?.name,
       slug: article.slugHint,
       title: article.title,
@@ -105,6 +128,13 @@ export async function POST(request: Request) {
       region,
       writingStyle,
       writingStyleLabel: articleStyleLabel(writingStyle),
+      publishGate: decision || article.generationLog?.publishDecision || "PASS",
+      generationMode: article.generationMode,
+      generationLog: article.generationLog,
+      industryId: article.industryId,
+      blueprintId: article.blueprintId,
+      contentAngle: article.contentAngle,
+      pageType: article.pageType,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "생성에 실패했습니다.";

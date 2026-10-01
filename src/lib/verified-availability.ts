@@ -10,14 +10,47 @@ import {
 import type { Animal, ProjectExample, VendorProfile, VendorProfileStore } from "./vendor-profile-types";
 import { isCodeRenderedBlock } from "./vendor-profile-types";
 import type { AdVendor } from "./types";
+import { extractPlaceName } from "./region-geo";
+import {
+  bestProjectMatchType,
+  groundProjectExamplesHeading,
+  inferProjectTypeFromKeyword,
+  selectRelevantAnimals,
+  selectRelevantProjects,
+  type MatchType,
+  type MatchedAnimal,
+  type MatchedProject,
+  type TopicHints,
+} from "./verified-match";
+
+/** Richer per-block availability (PHASE 7). Backward-compatible string[] still exported. */
+export type VerifiedBlockMeta = {
+  blockKey: string;
+  available: boolean;
+  matchType?: MatchType | null;
+  itemCount: number;
+  matchedFields: string[];
+  /** Planner-safe heading hint when Verified heading must not overclaim. */
+  safeHeading?: string;
+  reason?: string;
+};
+
+export type VerifiedContextMeta = {
+  blocks: VerifiedBlockMeta[];
+  topicHints: TopicHints;
+};
 
 export type VerifiedPack = {
   view: ResolvedVendorView | null;
   matchingAnimals: Animal[];
   projects: ProjectExample[];
+  matchedAnimals: MatchedAnimal[];
+  matchedProjects: MatchedProject[];
+  /** Backward compatible list of available block keys */
   availableVerifiedBlocks: string[];
+  /** Richer metadata for Planner / QA (not raw DB dump) */
+  verifiedContext: VerifiedContextMeta;
   removedHints: Array<{ blockKey: string; reason: string }>;
-  /** Breed/topic used for animal filter */
   topicBreed?: string;
 };
 
@@ -46,6 +79,17 @@ export function extractBreedTopic(keyword: string, primaryTopic?: string): strin
     if (keyword.includes(breed)) return breed;
   }
   return "";
+}
+
+function buildTopicHints(keyword: string, primaryTopic?: string, topicBreed?: string): TopicHints {
+  return {
+    keyword,
+    region: extractPlaceName(keyword) || "",
+    primaryTopic: primaryTopic || topicBreed || "",
+    projectType: inferProjectTypeFromKeyword(keyword, primaryTopic),
+    breed: topicBreed || "",
+    service: /철거/.test(keyword) ? "철거" : /분양/.test(keyword) ? "분양" : "",
+  };
 }
 
 function blockAvailable(
@@ -84,7 +128,7 @@ function blockAvailable(
       return { ok: true };
     }
     case "project_examples": {
-      if (!projects.length) return { ok: false, reason: "ProjectExample 없음" };
+      if (!projects.length) return { ok: false, reason: "관련 ProjectExample 없음" };
       return { ok: true };
     }
     default: {
@@ -102,7 +146,7 @@ function blockAvailable(
 
 /**
  * Compute which verified/code-rendered blocks can be used BEFORE Planner.
- * Animals are filtered by topic breed when provided.
+ * Projects/animals are relevance-filtered (PHASE 7).
  */
 export function computeVerifiedAvailability(input: {
   blocks: ContentBlock[];
@@ -113,31 +157,90 @@ export function computeVerifiedAvailability(input: {
   primaryTopic?: string;
 }): VerifiedPack {
   const view = resolveVendorView(input.adVendor, input.profile);
-  const topicBreed = extractBreedTopic(input.keyword, input.primaryTopic);
-  const matchingAnimals = view
-    ? animalsForVendor(input.store.animals, view.vendorId, {
-        breed: topicBreed || undefined,
-        availableOnly: true,
-      })
-    : [];
-  const projects = view ? projectsForVendor(input.store.projectExamples, view.vendorId) : [];
+  const hasAnimalBlock = input.blocks.some(
+    (b) => b.key === "available_animals" && b.status !== "disabled"
+  );
+  const topicBreed = hasAnimalBlock ? extractBreedTopic(input.keyword, input.primaryTopic) : "";
+  const topicHints = buildTopicHints(input.keyword, input.primaryTopic, topicBreed);
+
+  const rawAnimals =
+    view && hasAnimalBlock
+      ? animalsForVendor(input.store.animals, view.vendorId, {
+          breed: topicBreed || undefined,
+          availableOnly: true,
+        })
+      : [];
+  // Re-apply exact breed relevance (defense in depth if breed filter was empty)
+  const matchedAnimals = selectRelevantAnimals(rawAnimals, topicHints);
+  const matchingAnimals = matchedAnimals.map((m) => m.animal);
+
+  const rawProjects = view ? projectsForVendor(input.store.projectExamples, view.vendorId) : [];
+  const matchedProjects = selectRelevantProjects(rawProjects, topicHints);
+  const projects = matchedProjects.map((m) => m.project);
 
   const availableVerifiedBlocks: string[] = [];
   const removedHints: Array<{ blockKey: string; reason: string }> = [];
+  const blockMetas: VerifiedBlockMeta[] = [];
 
   for (const block of input.blocks) {
     if (block.status === "disabled") continue;
     if (!block.verifiedDataRequired && !isCodeRenderedBlock(block.key)) continue;
     const check = blockAvailable(block, view, matchingAnimals, projects);
-    if (check.ok) availableVerifiedBlocks.push(block.key);
-    else removedHints.push({ blockKey: block.key, reason: check.reason || "unavailable" });
+    if (check.ok) {
+      availableVerifiedBlocks.push(block.key);
+      if (block.key === "project_examples") {
+        const matchType = bestProjectMatchType(matchedProjects);
+        blockMetas.push({
+          blockKey: block.key,
+          available: true,
+          matchType,
+          itemCount: projects.length,
+          matchedFields: [...new Set(matchedProjects.flatMap((m) => m.matchedFields))],
+          safeHeading: groundProjectExamplesHeading({
+            plannedHeading: "",
+            matchType,
+            region: topicHints.region,
+            projectType: topicHints.projectType,
+          }),
+        });
+      } else if (block.key === "available_animals") {
+        blockMetas.push({
+          blockKey: block.key,
+          available: true,
+          matchType: matchedAnimals[0]?.matchType || null,
+          itemCount: matchingAnimals.length,
+          matchedFields: [...new Set(matchedAnimals.flatMap((m) => m.matchedFields))],
+        });
+      } else {
+        blockMetas.push({
+          blockKey: block.key,
+          available: true,
+          matchType: null,
+          itemCount: 1,
+          matchedFields: [],
+        });
+      }
+    } else {
+      removedHints.push({ blockKey: block.key, reason: check.reason || "unavailable" });
+      blockMetas.push({
+        blockKey: block.key,
+        available: false,
+        matchType: null,
+        itemCount: 0,
+        matchedFields: [],
+        reason: check.reason,
+      });
+    }
   }
 
   return {
     view,
     matchingAnimals,
     projects,
+    matchedAnimals,
+    matchedProjects,
     availableVerifiedBlocks,
+    verifiedContext: { blocks: blockMetas, topicHints },
     removedHints,
     topicBreed: topicBreed || undefined,
   };
@@ -170,11 +273,38 @@ export function filterPlanWithVerifiedPack(
         continue;
       }
     }
+
+    let heading = section.heading;
+    if (section.blockKey === "project_examples") {
+      const meta = pack.verifiedContext.blocks.find((b) => b.blockKey === "project_examples");
+      heading = groundProjectExamplesHeading({
+        plannedHeading: section.heading,
+        matchType: meta?.matchType ?? bestProjectMatchType(pack.matchedProjects),
+        region: pack.verifiedContext.topicHints.region,
+        projectType: pack.verifiedContext.topicHints.projectType,
+      });
+    }
+
     sections.push({
       ...section,
+      heading,
       mustUseVerifiedData: Boolean(block.verifiedDataRequired) || Boolean(section.mustUseVerifiedData),
     });
   }
 
   return { plan: { ...plan, sections }, removed };
+}
+
+/** Compact planner prompt lines for verifiedContext (no raw PII dump). */
+export function formatVerifiedContextForPlanner(meta: VerifiedContextMeta): string {
+  const lines = meta.blocks
+    .filter((b) => b.available)
+    .map((b) => {
+      const parts = [`${b.blockKey} (items=${b.itemCount}`];
+      if (b.matchType) parts.push(`match=${b.matchType}`);
+      if (b.matchedFields.length) parts.push(`fields=${b.matchedFields.join("+")}`);
+      if (b.safeHeading) parts.push(`safeHeading="${b.safeHeading}"`);
+      return `- ${parts.join(", ")})`;
+    });
+  return lines.join("\n") || "(없음)";
 }

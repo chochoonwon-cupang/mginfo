@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
-import { checkMasterPassword, isMasterSession } from "@/lib/auth";
+import { checkMasterPassword, isAdminSession, isMasterSession } from "@/lib/auth";
 import {
   appendCampaignKeywords,
   consentedSites,
+  fetchSiteRecentPosts,
+  generateHubBoardArticle,
   hubCampaignStats,
   hubBoardTodaySummary,
   hubTodayProgress,
@@ -10,6 +12,8 @@ import {
   parseKeywordList,
   planHubCampaign,
   resolveCampaignTargets,
+  collectHubAvoidTitles,
+  collectHubTodayKeywords,
   type HubBoardCampaign,
 } from "@/lib/hub-board";
 import {
@@ -21,6 +25,7 @@ import {
   publishHubKeyword,
   upsertHubCampaign,
 } from "@/lib/hub-board-store";
+import { getSettings } from "@/lib/db";
 import { isOpsHub } from "@/lib/ops-hub";
 import { getOpsSites } from "@/lib/ops-store";
 import { persistFail } from "@/lib/persist-api";
@@ -32,6 +37,7 @@ export const maxDuration = 300;
 
 async function authorize(request: Request) {
   if (await isMasterSession()) return true;
+  if (await isAdminSession()) return true;
   return checkMasterPassword(request.headers.get("x-infocs-master") || "");
 }
 
@@ -159,6 +165,57 @@ export async function POST(request: Request) {
       });
     } catch (err) {
       return persistFail(err);
+    }
+  }
+
+  /** Safe preview: run content-pipeline only — never push to external boards. */
+  if (action === "preview") {
+    const keywordId = String(body.keywordId || "").trim();
+    if (!campaignId || !keywordId) {
+      return NextResponse.json({ error: "미리볼 키워드를 선택하세요." }, { status: 400 });
+    }
+    try {
+      const campaigns = await getHubCampaigns();
+      const campaign = campaigns.find((row) => row.id === campaignId);
+      const keyword = campaign?.keywords.find((row) => row.id === keywordId);
+      if (!campaign || !keyword) {
+        return NextResponse.json({ error: "키워드를 찾을 수 없습니다." }, { status: 404 });
+      }
+      const sites = await getOpsSites();
+      const site =
+        sites.find((row) => row.id === keyword.siteId) ||
+        sites.find((row) => campaign.siteIds?.includes(row.id)) ||
+        consentedSites(sites)[0];
+      if (!site) {
+        return NextResponse.json({ error: "미리볼 대상 사이트가 없습니다." }, { status: 400 });
+      }
+      const settings = await getSettings();
+      const recent = await fetchSiteRecentPosts(site);
+      const article = await generateHubBoardArticle(campaign, keyword, site, settings, {
+        titles: collectHubAvoidTitles(campaigns, recent.titles),
+        keywords: collectHubTodayKeywords(campaigns),
+        bodies: recent.bodies,
+      });
+      return NextResponse.json({
+        ok: true,
+        preview: true,
+        domain: site.domain,
+        keyword: keyword.keyword,
+        article: {
+          title: article.title,
+          excerpt: article.excerpt,
+          bodyHtml: article.bodyHtml,
+          slug: article.slug,
+          industryId: "industryId" in article ? article.industryId : undefined,
+          blueprintId: "blueprintId" in article ? article.blueprintId : undefined,
+          generationMode: "generationMode" in article ? article.generationMode : undefined,
+          generationLog: "generationLog" in article ? article.generationLog : undefined,
+          faqItems: article.faqItems,
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "미리보기 실패";
+      return NextResponse.json({ error: message }, { status: 400 });
     }
   }
 

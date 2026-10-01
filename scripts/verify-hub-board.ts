@@ -13,6 +13,8 @@ import {
   type HubBoardCampaign,
 } from "../src/lib/hub-board";
 import type { OpsSite } from "../src/lib/ops-ledger";
+import { listHubBoardTemplates, renderHubBoardTemplateArticle } from "../src/lib/hub-board-templates";
+import type { Settings } from "../src/lib/types";
 
 function assert(cond: unknown, message: string) {
   if (!cond) throw new Error(message);
@@ -290,4 +292,67 @@ const recovered = planHubCampaign(staleSites, sites, now);
 assert(recovered.planned === 2, "stale site ids fall back to consented sites");
 assert(recovered.campaign.keywords.every((row) => row.domain), "fallback assigns domains");
 
-console.log("verify-hub-board ok");
+const parsedMode = parseHubCampaign({
+  title: "템플릿광고",
+  contentMode: "template",
+  templateId: "goldendoodle-adoption",
+  vendorName: "오케이독",
+  dailyLimit: 10,
+  siteIds: ["s1"],
+  keywords: [],
+});
+assert(parsedMode?.contentMode === "template", "contentMode template is preserved");
+assert(parsedMode?.templateId === "goldendoodle-adoption", "templateId is preserved");
+assert(parseHubCampaign({ title: "기본" })?.contentMode === "gemini", "contentMode defaults to gemini");
+
+assert(listHubBoardTemplates().some((row) => row.id === "goldendoodle-adoption"), "goldendoodle template is registered");
+assert(listHubBoardTemplates().length >= 20, "multiple hub templates are registered");
+assert(listHubBoardTemplates().some((row) => row.id === "dog-adoption"), "dog-adoption template is registered");
+assert(listHubBoardTemplates().some((row) => row.id === "dog-rehome"), "dog-rehome template is registered");
+
+async function verifyTemplates() {
+  const tplCampaign = sample({
+    contentMode: "template",
+    templateId: "goldendoodle-adoption",
+    vendorName: "오케이독 부천본점",
+    vendorPhone: "0505-464-1004",
+    keywords: [{ id: "k-tpl", keyword: "부천 골든두들분양", status: "queued" }],
+  });
+  const tplSite = sites[0];
+  const settings = {
+    geminiApiKey: "",
+    geminiModel: "",
+    siteName: "테스트",
+    siteTagline: "",
+    publishBannedKeywords: [],
+  } as Settings;
+  const rendered = await renderHubBoardTemplateArticle(tplCampaign, tplCampaign.keywords[0], tplSite, settings);
+  assert(rendered.title.includes("부천") || rendered.title.includes("골든두들"), "template title uses place/topic");
+  assert(/STEP|골든두들|품종/.test(rendered.bodyHtml), "template body has breed depth");
+  assert(String(rendered.vendorName).includes("오케이독"), "vendor name is kept");
+  assert(!String(rendered.bodyHtml).includes("{{"), "placeholders are substituted");
+
+  const tplOther = await renderHubBoardTemplateArticle(
+    {
+      ...tplCampaign,
+      id: "c-other",
+      keywords: [{ id: "k-tpl2", keyword: "인천 골든두들분양", status: "queued" }],
+    },
+    { id: "k-tpl2", keyword: "인천 골든두들분양", status: "queued" },
+    { ...tplSite, id: "s2", domain: "b.example" },
+    settings
+  );
+  assert(tplOther.title !== rendered.title, "different regions get different titles");
+  assert(tplOther.bodyHtml.includes("인천") || tplOther.title.includes("인천"), "other region is reflected");
+  // Shared breed knowledge is intentional; uniqueness relies on place/vendor/variant + site-local avoid lists.
+  assert(rendered.bodyHtml !== tplOther.bodyHtml, "bodies are not byte-identical across regions");
+}
+
+verifyTemplates()
+  .then(() => {
+    console.log("verify-hub-board ok");
+  })
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

@@ -4,6 +4,7 @@ import { IndexList } from "@/components/IndexList";
 import { PartnerStrip } from "@/components/PartnerStrip";
 import { PostCard } from "@/components/PostCard";
 import { PromoBanner } from "@/components/PromoBanner";
+import { DemolitionLandingPage } from "@/components/main-landing/DemolitionLandingPage";
 import { MainLandingPage } from "@/components/main-landing/MainLandingPage";
 import { HubPortalPage } from "@/components/hub-portal/HubPortalPage";
 import { NightHome } from "@/components/themes/NightHome";
@@ -15,7 +16,8 @@ import { CarrotHome } from "@/components/themes/CarrotHome";
 import { StudioHome } from "@/components/themes/StudioHome";
 import { displaySiteName, parseCarrotKeywords, siteBrand } from "@/lib/categories";
 import { pickRandomBanner } from "@/lib/banners";
-import { getEnabledBanners, getPartners, getPublishedPosts, getSettings } from "@/lib/db";
+import { getEnabledBanners, getPartners, getPublishedPosts, getSettings, getSettingsForRequestHost } from "@/lib/db";
+import { getRequestHost } from "@/lib/host-profiles";
 import {
   buildMainLandingCopy,
   buildMainLandingDocumentTitle,
@@ -23,6 +25,14 @@ import {
   parseMainLandingConfig,
   resolveMainLandingImages,
 } from "@/lib/main-landing";
+import { resolvePublicOrigin } from "@/lib/main-landing/resolve-origin";
+import {
+  buildMainLandingJsonLdGraph,
+  buildMainLandingKeywords,
+  buildMainLandingOpenGraphImages,
+  buildMainLandingSeoDescription,
+} from "@/lib/main-landing/seo";
+import { resolveNaverVerification } from "@/lib/seo";
 import { getHubPortalFeed, hubPortalEnabled } from "@/lib/hub-portal";
 import { isOpsHub } from "@/lib/ops-hub";
 import { visitSeed } from "@/lib/shuffle";
@@ -32,13 +42,16 @@ import { Suspense } from "react";
 export const dynamic = "force-dynamic";
 
 export async function generateMetadata(): Promise<Metadata> {
-  const settings = await getSettings();
+  const host = await getRequestHost();
+  const baseSettings = await getSettings();
+  const settings = host ? await getSettingsForRequestHost(host) : baseSettings;
+  const origin = await resolvePublicOrigin();
   const brand = siteBrand(settings);
-  if (hubPortalEnabled(settings) && (await isOpsHub())) {
+  if (hubPortalEnabled(baseSettings) && (await isOpsHub())) {
     return {
       title: { absolute: "인포씨에스 매거진 - 블로그 광고 사이트 통합 콘텐츠" },
       description: "전국의 웹 블로그 사이트 상위노출 포스팅을 확인해보세요.",
-      alternates: { canonical: siteUrl("/") },
+      alternates: { canonical: `${origin}/` },
       robots: { index: true, follow: true },
       openGraph: {
         title: "인포씨에스 매거진 - 블로그 광고 사이트 통합 콘텐츠",
@@ -52,38 +65,51 @@ export async function generateMetadata(): Promise<Metadata> {
   }
   const landing = parseMainLandingConfig(settings.mainLanding);
   if (landing.enabled) {
+    const siteName = displaySiteName(settings.siteName);
     const name = landing.vendor.name || brand.name;
     const title = buildMainLandingDocumentTitle(landing, brand.name);
-    const description =
-      landing.vendor.intro ||
-      (landing.seoTitleSuffix
-        ? `${landing.vendor.keyword || name} — ${landing.seoTitleSuffix}`
-        : brand.description);
+    const description = buildMainLandingSeoDescription(landing, brand.description);
+    const keywords = buildMainLandingKeywords(landing);
+    const resolvedImages = await resolveMainLandingImages(landing, siteName);
+    const ogAlt = landing.vendor.keyword || title;
+    const ogImages = buildMainLandingOpenGraphImages(landing, resolvedImages, ogAlt);
+    const naverVerification = resolveNaverVerification(settings.naverSiteVerification);
     return {
       title: { absolute: title },
       description,
-      alternates: { canonical: siteUrl("/") },
+      keywords,
+      alternates: { canonical: `${origin}/` },
       robots: { index: true, follow: true },
       openGraph: {
         title,
         description,
-        url: siteUrl("/"),
-        siteName: name,
+        url: `${origin}/`,
+        siteName: landing.vendor.keyword || name,
         locale: "ko_KR",
         type: "website",
+        images: ogImages,
       },
+      twitter: {
+        card: ogImages?.length ? "summary_large_image" : "summary",
+        title,
+        description,
+        images: ogImages?.map((img) => img.url),
+      },
+      ...(naverVerification
+        ? { other: { "naver-site-verification": naverVerification } as Record<string, string> }
+        : {}),
     };
   }
   return {
     title: { absolute: `${brand.name} — ${brand.tagline}` },
     description: brand.description,
     keywords: [brand.name, brand.tagline, "매거진", "가이드"],
-    alternates: { canonical: siteUrl("/") },
+    alternates: { canonical: `${origin}/` },
     robots: { index: true, follow: true },
     openGraph: {
       title: `${brand.name} — ${brand.tagline}`,
       description: brand.description,
-      url: siteUrl("/"),
+      url: `${origin}/`,
       siteName: brand.name,
       locale: "ko_KR",
       type: "website",
@@ -97,13 +123,15 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default async function HomePage() {
-  const settings = await getSettings();
-  if (hubPortalEnabled(settings) && (await isOpsHub())) {
+  const host = await getRequestHost();
+  const baseSettings = await getSettings();
+  const settings = host ? await getSettingsForRequestHost(host) : baseSettings;
+  if (hubPortalEnabled(baseSettings) && (await isOpsHub())) {
     const feed = await getHubPortalFeed();
     return (
       <SiteFrame bare hideBottomNav>
         <Suspense fallback={<div style={{ padding: 40, color: "#eee" }}>불러오는 중…</div>}>
-          <HubPortalPage feed={feed} siteName={displaySiteName(settings.siteName)} settings={settings} />
+          <HubPortalPage feed={feed} siteName={displaySiteName(baseSettings.siteName)} settings={baseSettings} />
         </Suspense>
       </SiteFrame>
     );
@@ -113,10 +141,34 @@ export default async function HomePage() {
     const siteName = displaySiteName(settings.siteName);
     const copy = buildMainLandingCopy(landing, siteName);
     const images = await resolveMainLandingImages(landing, siteName);
+    const pageUrl = `${await resolvePublicOrigin()}/`;
+    const seoDescription = buildMainLandingSeoDescription(landing, siteBrand(settings).description);
+    const jsonLd = buildMainLandingJsonLdGraph({
+      landing,
+      copy,
+      pageUrl,
+      description: seoDescription,
+      imageUrl: images.hero || images.gallery[0] || "",
+    });
     return (
-      <SiteFrame bare hideBottomNav>
-        <MainLandingPage copy={copy} images={images} vendor={landing.vendor} />
-      </SiteFrame>
+      <>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        />
+        <SiteFrame bare hideBottomNav>
+          {landing.designId === "demolition-v1" ? (
+            <DemolitionLandingPage copy={copy} images={images} vendor={landing.vendor} />
+          ) : (
+            <MainLandingPage
+              copy={copy}
+              images={images}
+              vendor={landing.vendor}
+              designId={landing.designId}
+            />
+          )}
+        </SiteFrame>
+      </>
     );
   }
 

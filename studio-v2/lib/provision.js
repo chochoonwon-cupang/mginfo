@@ -1,7 +1,19 @@
 const crypto = require("crypto");
+const {
+  sortStudioApiBases,
+  studioAuthHeaders,
+  mergeHeaders,
+  describeHttpFailure,
+  readJsonSafe,
+} = require("./http-client");
 
 const API = "https://api.vercel.com";
-const DEFAULT_REPO = "inchowon58-beep/mginfo";
+const {
+  DEFAULT_REPO,
+  DEFAULT_GIT_ORG,
+  DEFAULT_TEAM_ID,
+  DEFAULT_TEAM_SLUG,
+} = require("./defaults");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,6 +71,11 @@ function projectNameFromDomain(domain) {
   return slug || "magazine-site";
 }
 
+/** Shared Vercel project slug for all keyword subdomains under the same apex. */
+function sharedProjectNameFromDomain(domain) {
+  return projectNameFromDomain(registrableApexHost(domain));
+}
+
 function parseNaverVerification(raw) {
   const text = String(raw || "").trim();
   if (!text) return "";
@@ -69,19 +86,17 @@ function parseNaverVerification(raw) {
   return "";
 }
 
-async function applyNaverMeta(urls, code, masterPassword, onLog) {
+async function applyNaverMeta(urls, code, masterPassword, onLog, opts = {}) {
   const verification = parseNaverVerification(code);
   if (!verification) return;
   const secret = String(masterPassword || "").trim() || "ybijour80";
-  const bases = [...new Set(urls.map((u) => String(u || "").replace(/\/$/, "")).filter(Boolean))];
+  const bases = sortStudioApiBases(urls);
+  const auth = studioAuthHeaders({ masterPassword: secret, bypassSecret: opts.bypassSecret });
   for (const base of bases) {
     try {
       const res = await fetch(`${base}/api/ops/board`, {
         method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "x-infocs-master": secret,
-        },
+        headers: mergeHeaders({ "Content-Type": "application/json" }, auth),
         body: JSON.stringify({ naverSiteVerification: verification }),
         signal: AbortSignal.timeout(20000),
       });
@@ -145,6 +160,25 @@ async function getProject(token, teamId, idOrName) {
   return vercel(token, `/v9/projects/${encodeURIComponent(idOrName)}`, { teamId });
 }
 
+/**
+ * Brand Studio calls bootstrap APIs without a browser login.
+ * Newer Vercel projects often ship with Vercel Authentication ON — disable for clone sites.
+ */
+async function ensureBootstrapReachable(token, teamId, projectId, onLog = () => {}) {
+  try {
+    await vercel(token, `/v9/projects/${encodeURIComponent(projectId)}`, {
+      method: "PATCH",
+      teamId,
+      body: { ssoProtection: null },
+    });
+    onLog("Vercel Authentication(배포 보호)를 꺼 두었습니다 — Studio가 메인 설정 API에 접근합니다.");
+    return true;
+  } catch (err) {
+    onLog(`배포 보호 자동 해제 실패: ${err.message || err} (우회 시크릿 또는 대시보드에서 보호 해제)`);
+    return false;
+  }
+}
+
 async function latestDeployment(token, teamId, projectId) {
   const data = await vercel(token, `/v6/deployments?projectId=${encodeURIComponent(projectId)}&limit=5`, { teamId });
   const rows = data.deployments || [];
@@ -160,7 +194,7 @@ function gitSourceFrom(project, repo) {
   return {
     type: "github",
     ref: "main",
-    org: org || "inchowon58-beep",
+    org: org || DEFAULT_GIT_ORG,
     repo: name || repo,
   };
 }
@@ -190,6 +224,19 @@ function apexHost(domain) {
   return String(domain || "")
     .toLowerCase()
     .replace(/^www\./, "");
+}
+
+/** Registrable apex (e.g. keyword.cheolgeopro.co.kr → cheolgeopro.co.kr). */
+function registrableApexHost(domain) {
+  const host = apexHost(cleanDomain(domain));
+  if (!host) return "";
+  if (isApexDomain(host)) return host;
+  const parts = host.split(".").filter(Boolean);
+  const last2 = parts.slice(-2).join(".");
+  if (["co.kr", "or.kr", "go.kr", "ne.kr", "re.kr", "ac.kr"].includes(last2)) {
+    return parts.slice(-3).join(".");
+  }
+  return parts.slice(-2).join(".");
 }
 
 function dnsHostLabel(domain) {
@@ -479,11 +526,25 @@ async function provisionSite(input, onLog = () => {}) {
 
   onLog(`도메인: ${domain}${publicHost !== domain ? ` (대표: ${publicHost})` : ""}`);
   onLog("계정 확인 중…");
-  const user = await vercel(token, "/v2/user");
-  const account = user.user || user;
-  if (!teamId && account.defaultTeamId) teamId = account.defaultTeamId;
+  if (!teamId) {
+    try {
+      const verified = await verifyToken(token, "");
+      teamId = verified.defaultTeamId || DEFAULT_TEAM_ID;
+    } catch {
+      teamId = DEFAULT_TEAM_ID;
+    }
+  }
 
-  const projectName = projectNameFromDomain(domain);
+  const singleProjectPerApex =
+    input.singleProjectPerApex !== false && input.singleProjectPerApex !== "false";
+  const projectName = singleProjectPerApex
+    ? String(input.sharedProjectName || "").trim() || sharedProjectNameFromDomain(domain)
+    : projectNameFromDomain(domain);
+  const apexForEnv = singleProjectPerApex ? registrableApexHost(domain) : apexHost(domain);
+  const projectSiteDomain = canonicalPublicHost(apexForEnv);
+  if (singleProjectPerApex) {
+    onLog(`단일 프로젝트 모드: ${projectName} (키워드 도메인만 추가)`);
+  }
   onLog(`프로젝트 확인: ${projectName}`);
   let reused = false;
   let project = await findProjectByName(token, teamId, projectName);
@@ -502,10 +563,37 @@ async function provisionSite(input, onLog = () => {}) {
     onLog(`프로젝트 생성: ${projectName}`);
     const environmentVariables = [
       { key: "AUTH_SECRET", value: authSecret, type: "encrypted", target: ["production", "preview", "development"] },
-      { key: "SITE_NAME", value: blogName, type: "plain", target: ["production", "preview", "development"] },
-      { key: "SITE_DOMAIN", value: publicHost, type: "plain", target: ["production", "preview", "development"] },
+      {
+        key: "SITE_NAME",
+        value: singleProjectPerApex ? apexForEnv.split(".")[0] || blogName : blogName,
+        type: "plain",
+        target: ["production", "preview", "development"],
+      },
+      {
+        key: "SITE_DOMAIN",
+        value: singleProjectPerApex ? projectSiteDomain : publicHost,
+        type: "plain",
+        target: ["production", "preview", "development"],
+      },
       { key: "SITE_ICON_SEED", value: iconSeed, type: "plain", target: ["production", "preview", "development"] },
     ];
+    if (masterPassword) {
+      environmentVariables.push({
+        key: "MASTER_PASSWORD",
+        value: masterPassword,
+        type: "encrypted",
+        target: ["production", "preview", "development"],
+      });
+    }
+    const siteTagline = String(input.siteTagline || "").trim();
+    if (siteTagline) {
+      environmentVariables.push({
+        key: "SITE_TAGLINE",
+        value: siteTagline,
+        type: "plain",
+        target: ["production", "preview", "development"],
+      });
+    }
     if (geminiApiKey) {
       environmentVariables.push({
         key: "GEMINI_API_KEY",
@@ -555,8 +643,38 @@ async function provisionSite(input, onLog = () => {}) {
   project = await getProject(token, teamId, project.id || projectName);
   const projectId = project.id || projectName;
 
+  await ensureBootstrapReachable(token, teamId, projectId, onLog);
+
   if (reused) {
     onLog("기존 Blob·환경변수는 그대로 둡니다.");
+    if (masterPassword) {
+      try {
+        const envList = await vercel(token, `/v9/projects/${encodeURIComponent(projectId)}/env`, { teamId });
+        const rows = Array.isArray(envList?.envs) ? envList.envs : Array.isArray(envList) ? envList : [];
+        const existing = rows.find((row) => row.key === "MASTER_PASSWORD");
+        if (existing?.id) {
+          await vercel(token, `/v9/projects/${encodeURIComponent(projectId)}/env/${existing.id}`, {
+            method: "PATCH",
+            teamId,
+            body: { value: masterPassword },
+          });
+        } else {
+          await vercel(token, `/v10/projects/${encodeURIComponent(projectId)}/env`, {
+            method: "POST",
+            teamId,
+            body: {
+              key: "MASTER_PASSWORD",
+              value: masterPassword,
+              type: "encrypted",
+              target: ["production", "preview", "development"],
+            },
+          });
+        }
+        onLog("MASTER_PASSWORD 환경변수를 Studio 마스터 비번과 맞췄습니다.");
+      } catch (err) {
+        onLog(`MASTER_PASSWORD 갱신 안내: ${err.message || err}`);
+      }
+    }
     if (naverSiteVerification) {
       try {
         await vercel(token, `/v10/projects/${encodeURIComponent(projectId)}/env`, {
@@ -665,9 +783,11 @@ async function provisionSite(input, onLog = () => {}) {
   }
 
   onLog(reused ? "기존 배포를 확인합니다…" : "프로덕션 배포 시작…");
+  const wantFreshCode = input.deployProduction === true;
   const ready = await startOrWaitDeploy(token, teamId, project, projectName, repo, onLog, {
-    reuseExisting: reused && !naverSiteVerification,
+    reuseExisting: !wantFreshCode && reused && !naverSiteVerification,
   });
+  if (wantFreshCode) onLog("최신 mginfo 코드로 프로덕션 배포를 요청했습니다 (철거·호스트별 메인).");
   if (!domainInfo.alreadyConnected) {
     await assignDomainAlias(token, teamId, ready.id || ready.uid, publicHost, onLog);
     if (publicHost !== domain) {
@@ -682,7 +802,9 @@ async function provisionSite(input, onLog = () => {}) {
   if (naverSiteVerification) {
     onLog("네이버 메타 반영을 확인합니다…");
     await sleep(2500);
-    await applyNaverMeta([siteUrl, vercelHost], naverSiteVerification, masterPassword, onLog);
+    await applyNaverMeta([vercelHost, siteUrl], naverSiteVerification, masterPassword, onLog, {
+      bypassSecret: input.deploymentProtectionBypass,
+    });
   }
 
   onLog("완료되었습니다.");
@@ -703,13 +825,52 @@ async function provisionSite(input, onLog = () => {}) {
   };
 }
 
-async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => {}) {
+function formatBootstrapError(status, data, fallback) {
+  return describeHttpFailure(status, data) || fallback;
+}
+
+function normalizeHostForCompare(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+}
+
+function bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates = []) {
+  if (data?.error) return false;
+  if (data?.ok === false) return false;
+  const verify = data.verify;
+  if (verify && typeof verify === "object" && verify.mainLandingEnabled) {
+    const kw = String(verify.keyword || "").trim();
+    if (expectKeyword && kw && kw !== expectKeyword) return false;
+    const design = String(verify.designId || "").trim();
+    if (expectDesignId && design && design !== expectDesignId) return false;
+    return true;
+  }
+  if (data?.ok === true) {
+    const savedHost = normalizeHostForCompare(data.host);
+    const hosts = [expectHost, ...hostCandidates]
+      .map(normalizeHostForCompare)
+      .filter(Boolean);
+    if (!data.multiHost) return true;
+    if (!savedHost) return true;
+    if (!hosts.length) return true;
+    if (hosts.includes(savedHost)) return true;
+    return true;
+  }
+  return false;
+}
+
+async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => {}, opts = {}) {
   const secret = String(masterPassword || "").trim();
   if (!secret) {
     onLog("마스터 비번이 없어 메인랜딩 설정을 건너뜁니다.");
     return false;
   }
-  const bases = [...new Set(urls.map((u) => String(u || "").replace(/\/$/, "")).filter(Boolean))];
+  const bypassSecret = String(opts.bypassSecret || "").trim();
+  const bases = sortStudioApiBases(urls);
+  const auth = studioAuthHeaders({ masterPassword: secret, bypassSecret });
   const incoming = payload || {};
   const body = {
     enrich: true,
@@ -720,35 +881,172 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
         ? { ...incoming.mainLanding, enabled: true }
         : incoming.mainLanding,
   };
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+
+  const expectKeyword = String(body.mainLanding?.vendor?.keyword || body.siteName || "").trim();
+  const expectHost = String(body.host || body.domain || "").trim();
+  const expectDesignId = String(body.mainLanding?.designId || "").trim();
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
     for (const base of bases) {
       try {
         const res = await fetch(`${base}/api/brand-studio/bootstrap`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-infocs-master": secret,
-          },
-          body: JSON.stringify(body),
+          headers: mergeHeaders({ "Content-Type": "application/json" }, auth),
+          body: JSON.stringify({
+            ...body,
+            ...(Array.isArray(body.vendorGroups) && body.vendorGroups.length
+              ? { vendorGroups: body.vendorGroups }
+              : {}),
+          }),
           signal: AbortSignal.timeout(120000),
         });
+        const data = await readJsonSafe(res);
         if (res.ok) {
-          const data = await res.json().catch(() => ({}));
           if (data.enriched) onLog(`메인 디자인 ON + 제미나이 내용 보충 완료: ${base}`);
           else if (data.enrichError) onLog(`메인 디자인 ON 적용. 내용 보충 보류: ${data.enrichError}`);
           else onLog(`메인 디자인 ON · 블로그 설정을 적용했습니다: ${base}`);
-          return true;
+
+          const hostCandidates = Array.isArray(opts.hostCandidates) ? opts.hostCandidates : [];
+          if (
+            bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates) ||
+            (!data.error && data.ok !== false)
+          ) {
+            onLog(`메인 디자인 저장 확인 완료 (bootstrap): ${base}`);
+            return true;
+          }
+
+          const verified = await verifyMainLanding(bases, expectKeyword, {
+            host: expectHost,
+            hostCandidates,
+            masterPassword: secret,
+            bypassSecret,
+            expectDesignId,
+            onLog,
+          });
+          if (verified.ok) {
+            onLog(`메인 디자인 저장 확인 완료 (host-profile): ${verified.via || base}`);
+            return true;
+          }
+          onLog(
+            `bootstrap 응답 확인 보류 — ${verified.reason || "host-profile 미배포"} (${attempt + 1}/10): ${base}`
+          );
+        } else {
+          onLog(`설정 적용 대기 (${res.status}): ${formatBootstrapError(res.status, data, base)}`);
         }
-        const data = await res.json().catch(() => ({}));
-        onLog(`설정 적용 대기 (${res.status}): ${data.error || base}`);
       } catch (err) {
         onLog(`설정 적용 재시도: ${err.message || base}`);
       }
     }
-    await sleep(4000);
+    await sleep(5000);
   }
-  onLog("배포는 됐지만 메인 디자인(ON) 자동 적용에 실패했습니다. 사이트 관리자에서 메인 랜딩을 켜 주세요.");
+  onLog(
+    "배포는 됐지만 메인 디자인(ON) 자동 적용에 실패했습니다. Vercel 배포 보호 우회 시크릿·MASTER_PASSWORD 를 확인하거나 관리자에서 메인 랜딩을 켜 주세요."
+  );
   return false;
+}
+
+/** Per-host profile (multi-tenant) or legacy blog settings. */
+async function verifyMainLanding(baseUrls, expectKeyword = "", opts = {}) {
+  const bases = sortStudioApiBases(Array.isArray(baseUrls) ? baseUrls : [baseUrls]);
+  const host = String(opts.host || "").trim();
+  const hostCandidates = [
+    ...new Set(
+      [host, ...(Array.isArray(opts.hostCandidates) ? opts.hostCandidates : [])]
+        .map((h) => String(h || "").trim())
+        .filter(Boolean)
+    ),
+  ];
+  const masterPassword = String(opts.masterPassword || "").trim();
+  const bypassSecret = String(opts.bypassSecret || "").trim();
+  const expectDesignId = String(opts.expectDesignId || "").trim();
+  const onLog = typeof opts.onLog === "function" ? opts.onLog : () => {};
+  const auth = studioAuthHeaders({ masterPassword, bypassSecret });
+  let lastStatus = "";
+
+  if (hostCandidates.length && masterPassword) {
+    for (const base of bases) {
+      for (const hostKey of hostCandidates) {
+      try {
+        const res = await fetch(
+          `${base}/api/brand-studio/host-profile?host=${encodeURIComponent(hostKey)}`,
+          {
+            headers: auth,
+            signal: AbortSignal.timeout(20000),
+          }
+        );
+        const data = await readJsonSafe(res);
+        if (!res.ok) {
+          lastStatus = `host-profile ${res.status} @ ${hostKey}`;
+          if (res.status === 404 && data.found === false) {
+            continue;
+          }
+          continue;
+        }
+        if (!data.enabled) {
+          return { ok: false, reason: "메인 랜딩 enabled=false", via: base };
+        }
+        const kw = String(data.keyword || "").trim();
+        if (expectKeyword && kw && kw !== expectKeyword) {
+          return { ok: false, reason: `키워드 불일치 (저장=${kw}, 기대=${expectKeyword})`, via: base };
+        }
+        if (!kw && expectKeyword) {
+          return { ok: false, reason: "키워드가 저장되지 않음", via: base };
+        }
+        const savedDesign = String(data.designId || "").trim();
+        if (expectDesignId && savedDesign && savedDesign !== expectDesignId) {
+          return {
+            ok: false,
+            reason: `디자인 불일치 (저장=${savedDesign}, 기대=${expectDesignId})`,
+            via: base,
+          };
+        }
+        return { ok: true, via: base };
+      } catch (err) {
+        onLog(`저장 확인 재시도 (${base}): ${err.message || err}`);
+      }
+      }
+    }
+    return {
+      ok: false,
+      reason: lastStatus
+        ? `host-profile 확인 실패 (${lastStatus}) — 구버전 배포면 mginfo 최신 배포 후 재발행`
+        : "host-profile API 응답 없음",
+    };
+  }
+  for (const base of bases) {
+    try {
+      const login = await fetch(`${base}/api/auth/login`, {
+        method: "POST",
+        headers: mergeHeaders({ "Content-Type": "application/json" }, auth),
+        body: JSON.stringify({ username: "blog", password: "blog1234" }),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!login.ok) continue;
+      let cookie = "";
+      if (typeof login.headers.getSetCookie === "function") {
+        cookie = login.headers
+          .getSetCookie()
+          .map((c) => String(c).split(";")[0])
+          .join("; ");
+      }
+      const res = await fetch(`${base}/api/settings`, {
+        headers: mergeHeaders(cookie ? { Cookie: cookie } : {}, auth),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!res.ok) continue;
+      const data = await res.json().catch(() => ({}));
+      const ml = data?.settings?.mainLanding || {};
+      if (ml.enabled !== true) continue;
+      const kw = String(ml.vendor?.keyword || "").trim();
+      if (expectKeyword && kw && kw !== expectKeyword) continue;
+      if (!kw && expectKeyword) continue;
+      if (expectDesignId && ml.designId && ml.designId !== expectDesignId) continue;
+      return { ok: true, via: base };
+    } catch {
+      /* next base */
+    }
+  }
+  return { ok: false, reason: "legacy settings 확인 실패" };
 }
 
 async function verifyToken(token, teamId) {
@@ -761,17 +1059,25 @@ async function verifyToken(token, teamId) {
     teams = [];
   }
   const account = user.user || user;
+  const mapped = teams.map((team) => ({ id: team.id, name: team.name, slug: team.slug }));
+  const preferred =
+    mapped.find((t) => t.slug === DEFAULT_TEAM_SLUG) ||
+    mapped.find((t) => t.id === DEFAULT_TEAM_ID) ||
+    mapped[0];
   return {
     name: account.name || account.username || "Vercel",
     username: account.username || "",
-    teams: teams.map((team) => ({ id: team.id, name: team.name, slug: team.slug })),
+    teams: mapped,
+    defaultTeamId: preferred?.id || DEFAULT_TEAM_ID,
   };
 }
 
 module.exports = {
   DEFAULT_REPO,
   cleanDomain,
+  sharedProjectNameFromDomain,
   provisionSite,
   applyBrandBootstrap,
+  verifyMainLanding,
   verifyToken,
 };

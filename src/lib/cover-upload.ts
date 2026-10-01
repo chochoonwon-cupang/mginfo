@@ -2,6 +2,7 @@ import { put } from "@vercel/blob";
 import fs from "fs";
 import path from "path";
 import { hasBlobStore } from "@/lib/blob-store";
+import { toSiteAbsoluteMediaUrl } from "@/lib/media-url";
 
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/jpg", "image/svg+xml"]);
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -60,7 +61,8 @@ export async function saveCoverFile(file: File): Promise<string> {
         allowOverwrite: true,
         contentType,
       });
-      return `/api/media/${pathname}`;
+      // Absolute so hub→clone free-board sync does not break on relative /api/media paths.
+      return toSiteAbsoluteMediaUrl(`/api/media/${pathname}`);
     }
   }
 
@@ -71,5 +73,5 @@ export async function saveCoverFile(file: File): Promise<string> {
   const dir = path.join(process.cwd(), "public", "uploads", "covers");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, filename), Buffer.from(await file.arrayBuffer()));
-  return `/uploads/covers/${filename}`;
+  return toSiteAbsoluteMediaUrl(`/uploads/covers/${filename}`);
 }

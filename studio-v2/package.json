@@ -1,6 +1,6 @@
 {
   "name": "infocs-brand-studio",
-  "version": "0.1.0",
+  "version": "0.4.6",
   "private": true,
   "description": "Infocs Brand Studio — main landing drafts (isolated from Infocs Studio)",
   "author": "Infocs",
@@ -20,14 +20,16 @@
       "lib/**"
     ],
     "directories": {
-      "output": "../사이트만들기-브랜드"
+      "output": "dist-out"
     },
     "win": {
       "signAndEditExecutable": false,
       "target": [
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

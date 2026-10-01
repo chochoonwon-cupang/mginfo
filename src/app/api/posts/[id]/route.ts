@@ -13,7 +13,19 @@ import { parseFaqItems } from "@/lib/faq";
 import { extractPlaceName, parseNameList } from "@/lib/region-geo";
 import { parseVendorFields } from "@/lib/vendor";
 import { ensureVendorSlots } from "@/lib/vendor-slots";
-import type { PostStatus } from "@/lib/types";
+import type { PostStatus, PublishMode } from "@/lib/types";
+
+function parsePublishMode(raw: unknown, fallback?: PublishMode): PublishMode | undefined {
+  const value = String(raw || "").trim();
+  if (value === "direct" || value === "ai") return value;
+  return fallback;
+}
+
+function prepareBodyHtml(html: string, mode?: PublishMode) {
+  const cleaned = cleanHtml(html);
+  if (mode === "direct") return cleaned;
+  return cleanHtml(ensureVendorSlots(cleaned));
+}
 
 export async function PUT(
   request: Request,
@@ -61,12 +73,19 @@ export async function PUT(
       const idx = s.posts.findIndex((p) => p.id === id);
       if (idx < 0) return;
       const wasPublished = s.posts[idx].status === "published";
+      const publishMode =
+        body.publishMode !== undefined
+          ? parsePublishMode(body.publishMode, s.posts[idx].publishMode)
+          : s.posts[idx].publishMode;
       s.posts[idx] = {
         ...s.posts[idx],
         title: String(body.title ?? s.posts[idx].title).trim() || s.posts[idx].title,
         slug,
         excerpt: body.excerpt != null ? String(body.excerpt) : s.posts[idx].excerpt,
-        bodyHtml: body.bodyHtml != null ? cleanHtml(ensureVendorSlots(String(body.bodyHtml))) : s.posts[idx].bodyHtml,
+        bodyHtml:
+          body.bodyHtml != null
+            ? prepareBodyHtml(String(body.bodyHtml), publishMode)
+            : s.posts[idx].bodyHtml,
         category,
         tags: Array.isArray(body.tags)
           ? body.tags.map((t: string) => String(t)).filter(Boolean)
@@ -103,6 +122,7 @@ export async function PUT(
               : now
             : s.posts[idx].publishedAt,
         updatedAt: now,
+        publishMode,
         theme: body.theme != null ? String(body.theme) : s.posts[idx].theme,
         ...parseVendorFields(body),
         region:

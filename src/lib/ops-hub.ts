@@ -25,14 +25,17 @@ function envHostCandidates() {
 }
 
 export function isHubHost(host?: string | null) {
-  return HUB_HOSTS.has(normalizeHost(String(host || "")));
+  const h = normalizeHost(String(host || ""));
+  if (HUB_HOSTS.has(h)) return true;
+  // New Vercel team aliases: mginfo-phi.vercel.app, etc.
+  return /^mginfo(-[a-z0-9-]+)?\.vercel\.app$/.test(h);
 }
 
 export async function isOpsHub() {
   const flag = flagValue();
   if (flag === "1" || flag === "true") return true;
   if (flag === "0" || flag === "false") return false;
-  if (envHostCandidates().some((host) => HUB_HOSTS.has(host))) return true;
+  if (envHostCandidates().some((host) => isHubHost(host))) return true;
   try {
     const { headers } = await import("next/headers");
     const h = await headers();

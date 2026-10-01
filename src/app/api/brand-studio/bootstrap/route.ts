@@ -1,10 +1,19 @@
 import { NextResponse } from "next/server";
 import { checkMasterPassword } from "@/lib/auth";
-import { getSettings, updateStore } from "@/lib/db";
-import { enrichMainLandingCopy, parseMainLandingConfig } from "@/lib/main-landing";
+import { getSettings, readStore, updateStore } from "@/lib/db";
+import {
+  getHostProfile,
+  hostProfileFromBootstrapBody,
+  normalizeHostKey,
+  parseHostSiteProfile,
+} from "@/lib/host-profiles";
+import { enrichMainLandingCopy, mainLandingEnabled, parseMainLandingConfig } from "@/lib/main-landing";
 import { persistFail } from "@/lib/persist-api";
 import { revalidatePublicSite } from "@/lib/public-cache";
 import { isSiteThemeId } from "@/lib/site-theme";
+import { generateSiteTagline, isBlandSiteTagline } from "@/lib/site-tagline";
+import { mergeBootstrapVendor } from "@/lib/host-vendor-sync";
+import { normalizeVendorGroups } from "@/lib/vendor-groups";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -19,29 +28,97 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const body = await request.json().catch(() => ({}));
-  const wantEnrich = body.enrich !== false && body.mainLanding !== undefined;
+  const hostKey = normalizeHostKey(
+    typeof body.host === "string" ? body.host : typeof body.domain === "string" ? body.domain : ""
+  );
+  const multiHost = Boolean(hostKey);
+  const wantEnrich = body.enrich === true && body.mainLanding !== undefined;
+  const useGemini = body.enrich === true;
   const geminiFromStudio =
     typeof body.geminiApiKey === "string" && body.geminiApiKey.trim() && !body.geminiApiKey.includes("•")
       ? body.geminiApiKey.trim()
       : "";
   const geminiModel =
     typeof body.geminiModel === "string" && body.geminiModel.trim() ? body.geminiModel.trim() : "";
+  const incomingTagline =
+    typeof body.siteTagline === "string" && body.siteTagline.trim() ? body.siteTagline.trim() : "";
 
   try {
     await updateStore((s) => {
+      if (geminiFromStudio) s.settings.geminiApiKey = geminiFromStudio;
+      if (geminiModel) s.settings.geminiModel = geminiModel;
+      if (isSiteThemeId(body.siteTheme)) s.settings.siteTheme = body.siteTheme;
+      if (Array.isArray(body.vendorGroups)) {
+        s.vendorGroups = normalizeVendorGroups(body.vendorGroups);
+      }
+
+      if (multiHost) {
+        if (!s.hostProfiles) s.hostProfiles = {};
+        const prev = s.hostProfiles[hostKey];
+        const keyword = String(body.siteName || body.mainLanding?.vendor?.keyword || "").trim();
+        const groups = normalizeVendorGroups(s.vendorGroups);
+        let mainLandingRaw = body.mainLanding;
+        if (mainLandingRaw && keyword && groups.length) {
+          const merged = mergeBootstrapVendor(
+            keyword,
+            (mainLandingRaw as { vendor?: Record<string, unknown> }).vendor || {},
+            groups
+          );
+          mainLandingRaw = {
+            ...(mainLandingRaw as object),
+            vendor: merged.vendor,
+          };
+          (body as Record<string, unknown>)._vendorGroupId = merged.groupId;
+        }
+        const draft = hostProfileFromBootstrapBody({
+          ...(body as Record<string, unknown>),
+          mainLanding: mainLandingRaw,
+          company:
+            (body as Record<string, unknown>)._vendorGroupId && mainLandingRaw
+              ? (mainLandingRaw as { vendor?: { name?: string } }).vendor?.name
+              : body.company,
+        });
+        const profile = parseHostSiteProfile(
+          {
+            ...draft,
+            vendorGroupId:
+              typeof (body as Record<string, unknown>)._vendorGroupId === "string"
+                ? ((body as Record<string, unknown>)._vendorGroupId as string)
+                : prev?.vendorGroupId,
+            mainLanding: parseMainLandingConfig({
+              ...draft.mainLanding,
+              enabled: true,
+            }),
+          },
+          prev
+        );
+        if (profile) {
+          const aliasKeys = new Set<string>([hostKey]);
+          if (Array.isArray(body.hostAliases)) {
+            for (const alias of body.hostAliases) {
+              const k = normalizeHostKey(String(alias || ""));
+              if (k) aliasKeys.add(k);
+            }
+          }
+          for (const k of aliasKeys) {
+            s.hostProfiles[k] = profile;
+          }
+          s.settings.mainLanding = parseMainLandingConfig({ enabled: false });
+        }
+        return;
+      }
+
       if (typeof body.siteName === "string" && body.siteName.trim()) {
         s.settings.siteName = body.siteName.trim();
       }
+      if (incomingTagline) s.settings.siteTagline = incomingTagline;
       if (typeof body.company === "string") s.settings.company = body.company.trim();
       if (typeof body.phone === "string") s.settings.phone = body.phone.trim();
       if (typeof body.address === "string") s.settings.address = body.address.trim();
       if (typeof body.bizNo === "string") s.settings.bizNo = body.bizNo.trim();
-      if (isSiteThemeId(body.siteTheme)) s.settings.siteTheme = body.siteTheme;
       if (typeof body.naverSiteVerification === "string") {
         s.settings.naverSiteVerification = body.naverSiteVerification.trim();
       }
-      if (geminiFromStudio) s.settings.geminiApiKey = geminiFromStudio;
-      if (geminiModel) s.settings.geminiModel = geminiModel;
       if (body.mainLanding !== undefined) {
         s.settings.mainLanding = parseMainLandingConfig({
           ...body.mainLanding,
@@ -50,31 +127,83 @@ export async function POST(request: Request) {
       }
     });
 
+    let siteTagline = incomingTagline;
+    let taglineGenerated = false;
+    if (!siteTagline || isBlandSiteTagline(siteTagline)) {
+      const settings = await getSettings();
+      const keyword = String(body.siteName || settings.siteName || "").trim();
+      if (keyword) {
+        const apiKey = geminiFromStudio || settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
+        const designId =
+          typeof body.mainLanding === "object" && body.mainLanding
+            ? String((body.mainLanding as { designId?: string }).designId || "scalp-tattoo-v1")
+            : "scalp-tattoo-v1";
+        siteTagline = await generateSiteTagline({
+          keyword,
+          vendorName: typeof body.company === "string" ? body.company : settings.company,
+          apiKey,
+          model: geminiModel || settings.geminiModel,
+          seed: `${keyword}|bootstrap${hostKey ? `|${hostKey}` : ""}`,
+          useGemini,
+          designId,
+        });
+        taglineGenerated = true;
+        await updateStore((s) => {
+          if (multiHost && hostKey && s.hostProfiles?.[hostKey]) {
+            s.hostProfiles[hostKey].siteTagline = siteTagline;
+            if (s.hostProfiles[hostKey].mainLanding?.vendor) {
+              s.hostProfiles[hostKey].mainLanding.vendor.intro = siteTagline;
+            }
+          } else {
+            s.settings.siteTagline = siteTagline;
+          }
+        });
+      }
+    }
+
     let enriched = false;
     let enrichError = "";
     if (wantEnrich) {
       const settings = await getSettings();
-      const apiKey = settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
+      const apiKey =
+        geminiFromStudio || settings.geminiApiKey || process.env.GEMINI_API_KEY || "";
       if (!apiKey) {
         enrichError =
-          "제미나이 키 없음 — Studio 계정 설정에 Gemini API Key를 넣거나, 관리자 마스터 설정에 저장하세요.";
+          "제미나이 사용 체크됐으나 API 키 없음 — 계정 설정에 Gemini API Key를 저장하세요.";
       } else {
         try {
-          const config = parseMainLandingConfig(settings.mainLanding);
+          let config = parseMainLandingConfig(body.mainLanding);
+          if (multiHost && hostKey) {
+            const store = await readStore();
+            const storeProfile = store.hostProfiles?.[hostKey];
+            if (storeProfile?.mainLanding) config = parseMainLandingConfig(storeProfile.mainLanding);
+          } else {
+            config = parseMainLandingConfig(settings.mainLanding);
+          }
+          const keyword = String(body.siteName || config.vendor.keyword || settings.siteName || "").trim();
           const copyOverride = await enrichMainLandingCopy({
             config,
-            siteName: settings.siteName || config.vendor.keyword,
+            siteName: keyword || settings.siteName,
             apiKey,
             model: settings.geminiModel,
           });
           const enrichedAt = new Date().toISOString();
           await updateStore((s) => {
-            s.settings.mainLanding = parseMainLandingConfig({
+            const nextLanding = parseMainLandingConfig({
               ...config,
               enabled: true,
               copyOverride,
               enrichedAt,
             });
+            if (multiHost && hostKey) {
+              if (!s.hostProfiles) s.hostProfiles = {};
+              const row = s.hostProfiles[hostKey] || hostProfileFromBootstrapBody(body as Record<string, unknown>);
+              row.mainLanding = nextLanding;
+              row.updatedAt = enrichedAt;
+              s.hostProfiles[hostKey] = row;
+            } else {
+              s.settings.mainLanding = nextLanding;
+            }
           });
           enriched = true;
         } catch (err) {
@@ -84,9 +213,38 @@ export async function POST(request: Request) {
     }
 
     revalidatePublicSite();
+
+    const storeAfter = await readStore();
+    let verify: {
+      mainLandingEnabled: boolean;
+      keyword: string;
+      designId: string;
+    } = { mainLandingEnabled: false, keyword: "", designId: "" };
+    if (multiHost && hostKey) {
+      const profile = getHostProfile(storeAfter, hostKey);
+      const ml = profile?.mainLanding;
+      verify = {
+        mainLandingEnabled: mainLandingEnabled({ mainLanding: ml }),
+        keyword: String(ml?.vendor?.keyword || profile?.siteName || "").trim(),
+        designId: String(ml?.designId || "").trim(),
+      };
+    } else {
+      const ml = parseMainLandingConfig(storeAfter.settings.mainLanding);
+      verify = {
+        mainLandingEnabled: mainLandingEnabled({ mainLanding: ml }),
+        keyword: String(ml.vendor.keyword || storeAfter.settings.siteName || "").trim(),
+        designId: String(ml.designId || "").trim(),
+      };
+    }
+
     return NextResponse.json({
       ok: true,
+      host: hostKey || undefined,
+      multiHost,
       enriched,
+      siteTagline: siteTagline || undefined,
+      taglineGenerated,
+      verify,
       ...(enrichError ? { enrichError } : {}),
     });
   } catch (err) {

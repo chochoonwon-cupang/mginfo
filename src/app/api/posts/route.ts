@@ -13,7 +13,19 @@ import { extraImageLimit, parsePostImages } from "@/lib/post-images";
 import { extractPlaceName, parseNameList } from "@/lib/region-geo";
 import { parseVendorFields } from "@/lib/vendor";
 import { ensureVendorSlots } from "@/lib/vendor-slots";
-import type { PostStatus } from "@/lib/types";
+import type { PostStatus, PublishMode } from "@/lib/types";
+
+function parsePublishMode(raw: unknown): PublishMode | undefined {
+  const value = String(raw || "").trim();
+  if (value === "direct" || value === "ai") return value;
+  return undefined;
+}
+
+function prepareBodyHtml(html: string, mode?: PublishMode) {
+  const cleaned = cleanHtml(html);
+  if (mode === "direct") return cleaned;
+  return cleanHtml(ensureVendorSlots(cleaned));
+}
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -57,13 +69,14 @@ export async function POST(request: Request) {
   const category = ensureCategorySlug(body.category, store.categories || []);
   if (store.posts.some((p) => p.slug === slug)) slug = `${slug}-${Date.now().toString(36)}`;
 
+  const publishMode = parsePublishMode(body.publishMode);
   const now = new Date().toISOString();
   const post = {
     id: uid(),
     slug,
     title,
     excerpt: String(body.excerpt || ""),
-    bodyHtml: cleanHtml(ensureVendorSlots(String(body.bodyHtml || ""))),
+    bodyHtml: prepareBodyHtml(String(body.bodyHtml || ""), publishMode),
     category,
     tags: Array.isArray(body.tags)
       ? body.tags.map((t: string) => String(t)).filter(Boolean)
@@ -83,6 +96,7 @@ export async function POST(request: Request) {
     publishedAt: status === "published" ? now : null,
     createdAt: now,
     updatedAt: now,
+    publishMode,
     theme: String(body.theme || "art-v1"),
     ...parseVendorFields(body),
     region:

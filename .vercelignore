@@ -1,0 +1,15 @@
+사이트만들기-브랜드
+사이트만들기
+src/src
+studio/node_modules
+studio/dist
+studio/release
+InfocsStudio.exe
+*.exe
+*.blockmap
+*.7z
+data/store.json
+data/hub-board.json
+public/uploads
+scripts/*.out.json
+scripts/phase9-observations

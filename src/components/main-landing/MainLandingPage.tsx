@@ -262,16 +262,19 @@ export function MainLandingPage({
   copy,
   images,
   vendor,
+  designId = "scalp-tattoo-v1",
 }: {
   copy: MainLandingCopy;
   images: MainLandingResolvedImages;
   vendor: MainLandingVendor;
+  designId?: string;
 }) {
   const theme = copy.theme;
   const year = new Date().getFullYear();
+  const isDemolition = designId === "demolition-v1";
   return (
     <div
-      className="main-landing"
+      className={`main-landing${isDemolition ? " is-demolition" : ""}`}
       style={
         {
           ["--ml-accent" as string]: theme.accent,
@@ -293,13 +296,25 @@ export function MainLandingPage({
             </span>
           </a>
           <nav className="ml-nav" aria-label="메인 메뉴">
-            <a href="#about">소개</a>
-            <a href="#services">시술</a>
-            <a href="#gallery">갤러리</a>
-            <a href="#process">과정</a>
-            <a href="#director">원장</a>
-            <a href="#reviews">후기</a>
-            <a href="#faq">FAQ</a>
+            {isDemolition ? (
+              <>
+                <a href="#about">소개</a>
+                <a href="#gallery">시공사례</a>
+                <a href="#process">진행절차</a>
+                <a href="#reviews">후기</a>
+                <a href="#faq">FAQ</a>
+              </>
+            ) : (
+              <>
+                <a href="#about">소개</a>
+                <a href="#services">시술</a>
+                <a href="#gallery">갤러리</a>
+                <a href="#process">과정</a>
+                <a href="#director">원장</a>
+                <a href="#reviews">후기</a>
+                <a href="#faq">FAQ</a>
+              </>
+            )}
             <Link className="ml-nav-blog" href="/posts">
               블로그
             </Link>

@@ -2,11 +2,20 @@
 
 export type CatalogStatus = "draft" | "active" | "disabled";
 
+export type IndustryResolverHints = {
+  keywords?: string[];
+  aliases?: string[];
+  serviceTerms?: string[];
+  negativeTerms?: string[];
+};
+
 export type Industry = {
   id: string;
   key: string;
   name: string;
   description?: string;
+  /** Deterministic keyword → industry signals (no Gemini). */
+  resolverHints?: IndustryResolverHints;
   status: CatalogStatus;
   createdAt: string;
   updatedAt: string;

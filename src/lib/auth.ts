@@ -36,7 +36,7 @@ export async function createMasterToken(): Promise<string> {
   return new SignJWT({ role: "master" })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime("8h")
+    .setExpirationTime("7d")
     .sign(secretKey());
 }
 
@@ -74,7 +74,7 @@ export async function setMasterCookie(token: string) {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
-    maxAge: 60 * 60 * 8,
+    maxAge: 60 * 60 * 24 * 7,
   });
 }
 
