@@ -639,6 +639,77 @@ ipcMain.handle("brand:apply-vendor-groups", async (_e, payload) => {
   return { ok: true, count: data.count || groups.length, hostsUpdated: data.hostsUpdated || 0 };
 });
 
+function resolveLedgerApex(site) {
+  let apex = String(site?.apexDomain || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, "");
+  if (apex) return apex;
+  const host = String(site?.domain || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, "");
+  const parts = host.split(".").filter(Boolean);
+  const kr2 = ["co.kr", "or.kr", "go.kr", "ne.kr", "re.kr", "ac.kr"];
+  const last2 = parts.slice(-2).join(".");
+  if (kr2.includes(last2) && parts.length >= 3) return parts.slice(-3).join(".");
+  if (parts.length >= 2) return parts.slice(-2).join(".");
+  return host;
+}
+
+ipcMain.handle("brand:apply-apex-contact", async (_e, payload) => {
+  const cfg = ensureConfigHydrated();
+  if (!String(cfg.opsMasterPassword || "").trim()) {
+    throw new Error("마스터 비밀번호를 저장하세요.");
+  }
+  const domain = String(payload?.domain || payload?.id || "")
+    .trim()
+    .toLowerCase();
+  const sites = readSites(app.getPath("userData"));
+  const site = sites.find((row) => String(row.domain || row.id || "").toLowerCase() === domain);
+  const hub = String(cfg.opsHubUrl || "").replace(/\/$/, "");
+  const fromSite = site || sites.find((s) => s.siteUrl || s.vercelHost);
+  const { sortStudioApiBases, studioAuthHeaders, mergeHeaders } = require("./lib/http-client");
+  const bases = sortStudioApiBases([fromSite?.vercelHost, fromSite?.siteUrl, hub].filter(Boolean));
+  if (!bases.length) {
+    throw new Error("발행 대장 사이트 URL 또는 허브 URL이 필요합니다.");
+  }
+  const apex = String(payload?.apex || resolveLedgerApex(site || fromSite) || "").trim();
+  if (!apex) throw new Error("메인 도메인(apex)을 확인할 수 없습니다.");
+
+  const body = {
+    apex,
+    company: String(payload?.company || "").trim(),
+    phone: String(payload?.phone || "").trim(),
+    address: String(payload?.address || "").trim(),
+    bizNo: String(payload?.bizNo || payload?.businessNumber || "").trim(),
+  };
+  if (!body.company && !body.phone && !body.address && !body.bizNo) {
+    throw new Error("상호·전화·주소·사업자번호 중 하나 이상 입력하세요.");
+  }
+
+  const auth = studioAuthHeaders({
+    masterPassword: cfg.opsMasterPassword,
+    bypassSecret: cfg.deploymentProtectionBypass,
+  });
+  const res = await fetch(`${bases[0]}/api/brand-studio/host-profiles/bulk-contact`, {
+    method: "POST",
+    headers: mergeHeaders({ "Content-Type": "application/json" }, auth),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+  const ledgerCount = sites.filter((s) => resolveLedgerApex(s) === apex.replace(/^www\./, "")).length;
+  return {
+    ok: true,
+    apex: data.apex || apex,
+    hostsUpdated: data.hostsUpdated || 0,
+    ledgerCount,
+  };
+});
+
 ipcMain.handle("brand:update-site", async (_e, payload) => {
   const cfg = ensureConfigHydrated();
   const domain = String(payload?.domain || payload?.id || "")

@@ -198,8 +198,35 @@
                 <input id="edit-naver-pw" type="password" />
               </div>
             </div>
-            <label>주소</label>
+            <label>주소 (이 키워드만)</label>
             <input id="edit-address" />
+            <div class="apex-bulk-block">
+              <h4>메인 도메인 전체 일괄반영</h4>
+              <p id="apex-bulk-hint" class="hint"></p>
+              <p class="hint">
+                같은 apex(예: cheolgeopro.co.kr) 키워드 서브도메인의 메인·푸터 연락처만 Blob에서 한 번에
+                바꿉니다. Vercel 재배포 없음.
+              </p>
+              <label>상호</label>
+              <input id="bulk-company" placeholder="주식회사 인포씨에스" />
+              <div class="grid-2">
+                <div>
+                  <label>전화</label>
+                  <input id="bulk-phone" placeholder="02-000-0000" />
+                </div>
+                <div>
+                  <label>사업자등록번호</label>
+                  <input id="bulk-bizno" placeholder="000-00-00000" />
+                </div>
+              </div>
+              <label>주소 (전체 키워드 공통)</label>
+              <input id="bulk-address" placeholder="서울 …" />
+              <div class="actions">
+                <button class="btn primary" type="button" id="btn-apply-apex-contact">
+                  이 메인 도메인 전체 반영
+                </button>
+              </div>
+            </div>
             <label>블로그 디자인</label>
             <select id="edit-site-theme">
               <option value="folio">1 · 폴리오</option>

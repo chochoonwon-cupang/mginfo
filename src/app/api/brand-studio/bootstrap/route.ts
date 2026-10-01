@@ -187,7 +187,7 @@ export async function POST(request: Request) {
 
     /** Blob read-after-write 지연 — 한 요청 안에서 기다려 Studio 재POST(제미나이 재호출) 방지 */
     if (multiHost && hostKey && hostProfileUpserted) {
-      await new Promise((r) => setTimeout(r, 900));
+      await new Promise((r) => setTimeout(r, 1200));
     }
 
     const verifyHostKeys = new Set<string>();
@@ -206,8 +206,8 @@ export async function POST(request: Request) {
       designId: string;
     } = { mainLandingEnabled: false, keyword: "", designId: "" };
     if (multiHost && hostKey) {
-      const readAttempts = hostProfileUpserted ? 12 : 1;
-      const readBackoffMs = 500;
+      const readAttempts = hostProfileUpserted ? 14 : 1;
+      const readBackoffMs = 600;
       for (let attempt = 0; attempt < readAttempts; attempt += 1) {
         let profile = null;
         for (const k of verifyHostKeys) {
@@ -251,6 +251,9 @@ export async function POST(request: Request) {
       siteTagline: siteTagline || undefined,
       taglineGenerated,
       verify,
+      ...(multiHost && hostKey && verifyHostKeys.size
+        ? { savedHostKeys: [...verifyHostKeys] }
+        : {}),
       ...(verifyPending ? { verifyPending: true } : {}),
       ...(enrichError ? { enrichError } : {}),
       ...(!savedOk && multiHost

@@ -21,8 +21,12 @@ function sleep(ms) {
 }
 
 /** host-profile GET: punycode first (unicode host often 404/525 from Node fetch). */
-function studioHostVerifyKeys(host, extra = []) {
-  const raw = [...(Array.isArray(extra) ? extra : []), host]
+function studioHostVerifyKeys(host, extra = [], savedHostKeys = []) {
+  const raw = [
+    ...(Array.isArray(savedHostKeys) ? savedHostKeys : []),
+    ...(Array.isArray(extra) ? extra : []),
+    host,
+  ]
     .map((h) =>
       String(h || "")
         .trim()
@@ -879,9 +883,22 @@ function normalizeHostForCompare(raw) {
 }
 
 /** bootstrap POST 1회 + Blob 반영 대기 후 host-profile 확인 (재POST 시 enrich 비용 방지) */
-const BOOTSTRAP_POST_VERIFY_WAIT_MS = 5200;
-const BOOTSTRAP_HOST_VERIFY_INTERVAL_MS = 3200;
-const BOOTSTRAP_HOST_VERIFY_MAX = 6;
+const BOOTSTRAP_POST_VERIFY_WAIT_MS = 9000;
+const BOOTSTRAP_HOST_VERIFY_INTERVAL_MS = 4500;
+const BOOTSTRAP_HOST_VERIFY_MAX = 10;
+
+/** HTTP 200 + 서버 ok — Blob read-after-write는 1~2분 걸릴 수 있음 */
+function bootstrapServerAcceptedSave(lastBootstrap) {
+  const resOk = Boolean(lastBootstrap?.resOk);
+  const data = lastBootstrap?.data;
+  if (!resOk || !data) return false;
+  if (data.ok === false && data.error) return false;
+  return (
+    data.ok === true ||
+    data.verifyPending === true ||
+    (Array.isArray(data.savedHostKeys) && data.savedHostKeys.length > 0)
+  );
+}
 
 function bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates = []) {
   if (data?.error && data?.ok === false) return false;
@@ -896,9 +913,6 @@ function bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, 
     return true;
   }
   if (data?.ok === true && !data?.multiHost) return true;
-  if (data?.ok === true && data?.multiHost && expectHost && expectDesignId) {
-    return false;
-  }
   if (data?.ok === true && data?.multiHost) {
     return Boolean(data.verify?.mainLandingEnabled);
   }
@@ -937,6 +951,7 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
   const verifyOpts = {
     host: expectHost,
     hostCandidates,
+    savedHostKeys: [],
     masterPassword: secret,
     bypassSecret,
     expectDesignId,
@@ -967,6 +982,9 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
         });
         const data = await readJsonSafe(res);
         lastBootstrap = { data, base, resOk: res.ok };
+        if (Array.isArray(data?.savedHostKeys) && data.savedHostKeys.length) {
+          verifyOpts.savedHostKeys = data.savedHostKeys;
+        }
         if (!res.ok) {
           onLog(`설정 적용 대기 (${res.status}): ${formatBootstrapError(res.status, data, base)}`);
           continue;
@@ -1017,13 +1035,28 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
       onLog(`메인 디자인 저장 확인 완료 (host-profile): ${verified.via || base}`);
       return true;
     }
+    verifyOpts._lastVerifyReason = verified.reason || "";
     onLog(
       `메인 확인 대기 (${verifyAttempt + 1}/${BOOTSTRAP_HOST_VERIFY_MAX}): ${verified.reason || "host-profile"}`
     );
   }
-  onLog(
-    "배포는 됐지만 메인 디자인(ON) 자동 적용에 실패했습니다. Vercel 배포 보호 우회 시크릿·MASTER_PASSWORD 를 확인하거나 관리자에서 메인 랜딩을 켜 주세요."
-  );
+  if (bootstrapServerAcceptedSave(lastBootstrap)) {
+    onLog(
+      "메인 저장은 서버에 반영됐습니다. Blob·CDN 반영이 늦어 자동 확인만 못 했습니다 — 1~2분 뒤 키워드 URL에서 메인을 확인하세요."
+    );
+    return true;
+  }
+
+  const lastReason = verifyOpts._lastVerifyReason || "";
+  if (/host-profile 404/i.test(lastReason)) {
+    onLog(
+      "배포는 됐지만 Studio가 Blob에서 이 키워드 host-profile을 찾지 못했습니다. 키워드 URL(서브도메인)로 관리자 → 메인 랜딩 ON 저장 후 공개 홈을 확인하세요. (마스터 비번 오류면 401 unauthorized 가 나옵니다.)"
+    );
+  } else {
+    onLog(
+      "배포는 됐지만 메인 디자인(ON) 자동 확인에 실패했습니다. 배포 보호 우회 시크릿·MASTER_PASSWORD·Blob 연결을 확인하거나 관리자에서 메인 랜딩을 켜 주세요."
+    );
+  }
   return false;
 }
 
@@ -1031,7 +1064,7 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
 async function verifyMainLanding(baseUrls, expectKeyword = "", opts = {}) {
   const bases = sortStudioApiBases(Array.isArray(baseUrls) ? baseUrls : [baseUrls]);
   const host = String(opts.host || "").trim();
-  const hostCandidates = studioHostVerifyKeys(host, opts.hostCandidates);
+  const hostCandidates = studioHostVerifyKeys(host, opts.hostCandidates, opts.savedHostKeys);
   const masterPassword = String(opts.masterPassword || "").trim();
   const bypassSecret = String(opts.bypassSecret || "").trim();
   const expectDesignId = String(opts.expectDesignId || "").trim();

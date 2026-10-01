@@ -281,6 +281,36 @@ select {
   margin: 0 0 8px;
   font-size: 1.05rem;
 }
+.apex-bulk-block {
+  margin: 1.25rem 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.65rem;
+  background: rgba(0, 0, 0, 0.18);
+}
+.apex-bulk-block h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+.apex-group-head {
+  list-style: none;
+  margin: 1rem 0 0.35rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.apex-group-head strong {
+  font-size: 0.92rem;
+}
+.apex-group-head .hint {
+  margin: 0;
+  flex: 1 1 100%;
+}
 .site-edit[hidden] {
   display: none !important;
 }

@@ -236,6 +236,33 @@ function renderPreviews(rows) {
   }
 }
 
+function siteApex(site) {
+  let apex = String(site?.apexDomain || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, "");
+  if (apex) return apex;
+  const host = String(site?.domain || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, "");
+  const parts = host.split(".").filter(Boolean);
+  const kr2 = ["co.kr", "or.kr", "go.kr", "ne.kr", "re.kr", "ac.kr"];
+  const last2 = parts.slice(-2).join(".");
+  if (kr2.includes(last2) && parts.length >= 3) return parts.slice(-3).join(".");
+  if (parts.length >= 2) return parts.slice(-2).join(".");
+  return host;
+}
+
+function sitesSortedByApex() {
+  return [...state.sites].sort((a, b) => {
+    const ax = siteApex(a);
+    const bx = siteApex(b);
+    if (ax !== bx) return ax.localeCompare(bx, "ko");
+    return String(a.keyword || a.domain || "").localeCompare(String(b.keyword || b.domain || ""), "ko");
+  });
+}
+
 function renderSites() {
   const list = $("site-list");
   const pager = $("site-pager");
@@ -243,7 +270,8 @@ function renderSites() {
   list.innerHTML = "";
   pager.innerHTML = "";
 
-  const total = state.sites.length;
+  const ordered = sitesSortedByApex();
+  const total = ordered.length;
   if (!total) {
     if (countEl) countEl.textContent = "";
     list.innerHTML = "<li>아직 발행된 사이트가 없습니다.</li>";
@@ -255,12 +283,30 @@ function renderSites() {
   if (state.sitePage < 1) state.sitePage = 1;
 
   const start = (state.sitePage - 1) * SITE_PAGE_SIZE;
-  const pageRows = state.sites.slice(start, start + SITE_PAGE_SIZE);
+  const pageRows = ordered.slice(start, start + SITE_PAGE_SIZE);
   if (countEl) {
-    countEl.textContent = `전체 ${total}개 · ${state.sitePage}/${totalPages}페이지 (페이지당 ${SITE_PAGE_SIZE}개)`;
+    countEl.textContent = `전체 ${total}개 · ${state.sitePage}/${totalPages}페이지 (페이지당 ${SITE_PAGE_SIZE}개) · apex별 묶음`;
   }
 
+  let lastApex = "";
   for (const site of pageRows) {
+    const apex = siteApex(site);
+    if (apex && apex !== lastApex) {
+      lastApex = apex;
+      const apexCount = ordered.filter((s) => siteApex(s) === apex).length;
+      const head = document.createElement("li");
+      head.className = "apex-group-head";
+      const info = document.createElement("div");
+      info.innerHTML = `<strong>${apex}</strong><span class="hint">발행 대장 ${apexCount}개 키워드 · 이 apex hostProfiles만 일괄 수정</span>`;
+      head.appendChild(info);
+      const bulkBtn = document.createElement("button");
+      bulkBtn.className = "btn";
+      bulkBtn.type = "button";
+      bulkBtn.textContent = "연락처 일괄반영";
+      bulkBtn.onclick = () => openSiteEdit(site, { focusBulk: true });
+      head.appendChild(bulkBtn);
+      list.appendChild(head);
+    }
     const li = document.createElement("li");
     li.innerHTML = `<div><strong>${site.keyword || site.siteName}</strong><br/><small>${site.domain} · ${site.siteTheme} · ${site.designId}${site.address ? ` · ${site.address}` : ""}${site.naverId ? ` · 네이버 ${site.naverId}` : ""}${site.naverSiteVerification ? " · 메타✓" : ""}</small></div>`;
     const actions = document.createElement("div");
@@ -351,8 +397,11 @@ function renderSites() {
   pager.appendChild(next);
 }
 
-function openSiteEdit(site) {
+function openSiteEdit(site, opts = {}) {
   state.editingDomain = site.domain || site.id || "";
+  state.editingSite = site;
+  const apex = siteApex(site);
+  const apexCount = state.sites.filter((s) => siteApex(s) === apex).length;
   $("site-edit").hidden = false;
   $("site-edit-title").textContent = `${site.keyword || site.siteName} · ${site.domain}`;
   $("edit-naver-meta").value = site.naverSiteVerification || "";
@@ -360,17 +409,71 @@ function openSiteEdit(site) {
   $("edit-naver-pw").value = site.naverPassword || "";
   $("edit-address").value = site.address || "";
   $("edit-site-theme").value = site.siteTheme || "folio";
+  if ($("apex-bulk-hint")) {
+    $("apex-bulk-hint").textContent = `메인 도메인 ${apex} · 발행 대장 ${apexCount}개 (서버에 프로필 있는 키워드만 갱신)`;
+  }
   $("site-edit-status").textContent = "";
   $("site-edit").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  if (opts.focusBulk && $("bulk-phone")) {
+    $("bulk-phone").focus();
+  }
 }
 
 function closeSiteEdit() {
   state.editingDomain = "";
+  state.editingSite = null;
   $("site-edit").hidden = true;
   $("site-edit-status").textContent = "";
 }
 
 $("btn-cancel-site").onclick = () => closeSiteEdit();
+
+const btnApplyApexContact = $("btn-apply-apex-contact");
+if (btnApplyApexContact) {
+  btnApplyApexContact.onclick = async () => {
+    if (!state.editingSite || !state.editingDomain) {
+      $("site-edit-status").textContent = "먼저 발행 대장에서 사이트를 선택하세요.";
+      $("site-edit-status").style.color = "#f0a0a0";
+      return;
+    }
+    const apex = siteApex(state.editingSite);
+    const company = $("bulk-company").value.trim();
+    const phone = $("bulk-phone").value.trim();
+    const address = $("bulk-address").value.trim();
+    const bizNo = $("bulk-bizno").value.trim();
+    if (!company && !phone && !address && !bizNo) {
+      $("site-edit-status").textContent = "상호·전화·주소·사업자번호 중 하나 이상 입력하세요.";
+      $("site-edit-status").style.color = "#f0a0a0";
+      return;
+    }
+    const n = state.sites.filter((s) => siteApex(s) === apex).length;
+    if (
+      !confirm(
+        `${apex} 소속 키워드 host-profile에 연락처를 일괄 반영합니다.\n\n· 발행 대장 ${n}개 (같은 apex)\n· 다른 apex 사이트는 변경하지 않음\n· Vercel 재배포 없음\n\n진행할까요?`
+      )
+    ) {
+      return;
+    }
+    $("site-edit-status").textContent = "일괄 반영 중…";
+    $("site-edit-status").style.color = "";
+    try {
+      const res = await window.brandStudio.applyApexContact({
+        domain: state.editingDomain,
+        apex,
+        company,
+        phone,
+        address,
+        bizNo,
+      });
+      $("site-edit-status").textContent = `${res.apex}: 서버 ${res.hostsUpdated}개 host-profile 반영 (대장 ${res.ledgerCount}개 apex)`;
+      $("site-edit-status").style.color = "";
+      setStatus($("site-edit-status").textContent);
+    } catch (err) {
+      $("site-edit-status").textContent = err.message;
+      $("site-edit-status").style.color = "#f0a0a0";
+    }
+  };
+}
 
 $("btn-save-site").onclick = async () => {
   if (!state.editingDomain) return;
