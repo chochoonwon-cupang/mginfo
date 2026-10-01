@@ -8283,6 +8283,12 @@ a.ml-footer-row:hover {
   max-width: 28rem;
   margin-inline: auto;
 }
+@media (min-width: 768px) {
+  .demo-landing.is-dv-2 .demo-pill-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    max-width: none;
+  }
+}
 @media (max-width: 960px) {
   .demo-service-grid {
     grid-template-columns: 1fr 1fr;

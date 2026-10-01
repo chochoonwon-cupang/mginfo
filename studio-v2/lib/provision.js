@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { toASCII, toUnicode } = require("node:punycode");
 const {
   sortStudioApiBases,
   studioAuthHeaders,
@@ -17,6 +18,46 @@ const {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** host-profile GET: punycode first (unicode host often 404/525 from Node fetch). */
+function studioHostVerifyKeys(host, extra = []) {
+  const raw = [...(Array.isArray(extra) ? extra : []), host]
+    .map((h) =>
+      String(h || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^https?:\/\//, "")
+        .replace(/\/.*$/, "")
+    )
+    .filter(Boolean);
+  const out = new Set();
+  for (const h of raw) {
+    out.add(h);
+    const parts = h.split(".").filter(Boolean);
+    if (parts.length < 2) continue;
+    const label = parts[0];
+    const apex = parts.slice(1).join(".");
+    if (/[^\x00-\x7f]/.test(label)) {
+      try {
+        out.add(`${toASCII(label)}.${apex}`);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (label.startsWith("xn--")) {
+      try {
+        out.add(`${toUnicode(label)}.${apex}`);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return [...out].sort((a, b) => {
+    const ax = a.split(".")[0]?.startsWith("xn--") ? 0 : 1;
+    const bx = b.split(".")[0]?.startsWith("xn--") ? 0 : 1;
+    return ax - bx;
+  });
 }
 
 function domainFromProjectSlug(slug) {
@@ -902,17 +943,20 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
         });
         const data = await readJsonSafe(res);
         if (res.ok) {
-          if (data.enriched) onLog(`메인 디자인 ON + 제미나이 내용 보충 완료: ${base}`);
-          else if (data.enrichError) onLog(`메인 디자인 ON 적용. 내용 보충 보류: ${data.enrichError}`);
-          else onLog(`메인 디자인 ON · 블로그 설정을 적용했습니다: ${base}`);
-
           const hostCandidates = Array.isArray(opts.hostCandidates) ? opts.hostCandidates : [];
+          if (data?.ok === false || data?.error) {
+            onLog(`bootstrap 저장 실패: ${data.error || "host profile 미저장"} (${base})`);
+          } else if (data.enriched) {
+            onLog(`메인 디자인 ON + 제미나이 내용 보충 완료: ${base}`);
+          } else if (data.enrichError) {
+            onLog(`메인 디자인 ON 적용. 내용 보충 보류: ${data.enrichError}`);
+          } else {
+            onLog(`메인 디자인 ON · 블로그 설정을 적용했습니다: ${base}`);
+          }
+
           if (bootstrapSaveVerified(data, expectHost, expectKeyword, expectDesignId, hostCandidates)) {
             onLog(`메인 디자인 저장 확인 완료 (bootstrap): ${base}`);
             return true;
-          }
-          if (data?.ok === false || data?.error) {
-            onLog(`bootstrap 저장 실패: ${data.error || "host profile 미저장"} (${base})`);
           }
 
           const verified = await verifyMainLanding(bases, expectKeyword, {
@@ -949,13 +993,7 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
 async function verifyMainLanding(baseUrls, expectKeyword = "", opts = {}) {
   const bases = sortStudioApiBases(Array.isArray(baseUrls) ? baseUrls : [baseUrls]);
   const host = String(opts.host || "").trim();
-  const hostCandidates = [
-    ...new Set(
-      [host, ...(Array.isArray(opts.hostCandidates) ? opts.hostCandidates : [])]
-        .map((h) => String(h || "").trim())
-        .filter(Boolean)
-    ),
-  ];
+  const hostCandidates = studioHostVerifyKeys(host, opts.hostCandidates);
   const masterPassword = String(opts.masterPassword || "").trim();
   const bypassSecret = String(opts.bypassSecret || "").trim();
   const expectDesignId = String(opts.expectDesignId || "").trim();
@@ -977,7 +1015,10 @@ async function verifyMainLanding(baseUrls, expectKeyword = "", opts = {}) {
         const data = await readJsonSafe(res);
         if (!res.ok) {
           lastStatus = `host-profile ${res.status} @ ${hostKey}`;
-          if (res.status === 404 && data.found === false) {
+          if ((res.status === 404 || res.status === 525) && data.found === false) {
+            continue;
+          }
+          if (res.status === 525) {
             continue;
           }
           continue;
@@ -1009,7 +1050,7 @@ async function verifyMainLanding(baseUrls, expectKeyword = "", opts = {}) {
     return {
       ok: false,
       reason: lastStatus
-        ? `host-profile 확인 실패 (${lastStatus}) — 구버전 배포면 mginfo 최신 배포 후 재발행`
+        ? `host-profile 확인 대기 (${lastStatus}) — punycode URL로 재시도 중이거나 Blob 반영 지연`
         : "host-profile API 응답 없음",
     };
   }
