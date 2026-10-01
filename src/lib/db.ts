@@ -31,6 +31,7 @@ import {
   normalizeHostKey,
   normalizeHostProfiles,
 } from "./host-profiles";
+import { apexDomain, subdomainLabel } from "./ops-ledger";
 import { normalizeVendorGroups } from "./vendor-groups";
 
 const LOCAL_PATH = path.join(process.cwd(), "data", "store.json");
@@ -374,7 +375,11 @@ export async function getSettingsForRequestHost(requestHost?: string): Promise<S
   const profile = getHostProfile(store, host);
   if (profile) return mergeHostIntoSettings(store.settings, profile);
   if (isKeywordSubdomainHost(host)) {
+    const apex = apexDomain(host);
+    const label = subdomainLabel(host, apex).replace(/^@$/, "");
+    const fallbackName = label && label !== "@" ? label : host.split(".")[0] || store.settings.siteName;
     return mergeHostIntoSettings(store.settings, {
+      siteName: fallbackName,
       mainLanding: parseMainLandingConfig({ enabled: false }),
     });
   }

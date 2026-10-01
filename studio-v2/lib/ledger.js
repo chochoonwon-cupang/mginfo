@@ -54,4 +54,14 @@ function clearSites(userData) {
   return [];
 }
 
-module.exports = { readSites, writeSites, upsertSite, clearSites };
+function removeSite(userData, domain) {
+  const id = String(domain || "").trim().toLowerCase();
+  if (!id) return readSites(userData);
+  const sites = readSites(userData).filter(
+    (row) => String(row.domain || row.id || "").toLowerCase() !== id
+  );
+  writeSites(userData, sites);
+  return sites;
+}
+
+module.exports = { readSites, writeSites, upsertSite, clearSites, removeSite };

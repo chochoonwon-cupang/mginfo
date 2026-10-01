@@ -885,6 +885,10 @@ async function applyBrandBootstrap(urls, payload, masterPassword, onLog = () => 
   const expectKeyword = String(body.mainLanding?.vendor?.keyword || body.siteName || "").trim();
   const expectHost = String(body.host || body.domain || "").trim();
   const expectDesignId = String(body.mainLanding?.designId || "").trim();
+  if (body.mainLanding !== undefined && !expectHost) {
+    onLog("오류: bootstrap host(키워드 서브도메인)가 비어 있습니다.");
+    return false;
+  }
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     for (const base of bases) {

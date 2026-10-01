@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { readDrafts, writeDrafts, uid, previewHost } = require("./lib/drafts");
-const { readSites, upsertSite, clearSites } = require("./lib/ledger");
+const { readSites, upsertSite, clearSites, removeSite } = require("./lib/ledger");
 const {
   provisionSite,
   applyBrandBootstrap,
@@ -557,6 +557,54 @@ ipcMain.handle("brand:publish-batch", async (event, payload) => {
 ipcMain.handle("brand:clear-sites", async () => {
   const sites = clearSites(app.getPath("userData"));
   return { ok: true, sites };
+});
+
+async function deleteRemoteHostProfile(site, cfg) {
+  const { sortStudioApiBases, studioAuthHeaders } = require("./lib/http-client");
+  const host = String(site.domain || site.id || "").trim();
+  if (!host || !cfg.opsMasterPassword) return { ok: false, reason: "host or password missing" };
+  const bases = sortStudioApiBases([site.vercelHost, site.siteUrl].filter(Boolean));
+  const auth = studioAuthHeaders({
+    masterPassword: cfg.opsMasterPassword,
+    bypassSecret: cfg.deploymentProtectionBypass,
+  });
+  for (const base of bases) {
+    try {
+      const res = await fetch(
+        `${String(base).replace(/\/$/, "")}/api/brand-studio/host-profile?host=${encodeURIComponent(host)}`,
+        { method: "DELETE", headers: auth, signal: AbortSignal.timeout(60000) }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) return { ok: true, removed: data.removed || [host], via: base };
+    } catch {
+      /* next */
+    }
+  }
+  return { ok: false, reason: "remote delete failed" };
+}
+
+ipcMain.handle("brand:delete-site", async (_e, payload) => {
+  const cfg = ensureConfigHydrated();
+  const domain = String(payload?.domain || payload?.id || "")
+    .trim()
+    .toLowerCase();
+  if (!domain) throw new Error("삭제할 도메인을 지정하세요.");
+  const userData = app.getPath("userData");
+  const sites = readSites(userData);
+  const current = sites.find((row) => String(row.domain || row.id || "").toLowerCase() === domain);
+  if (!current) throw new Error("발행 대장에 해당 도메인이 없습니다.");
+
+  let remote = { ok: false, skipped: true };
+  if (payload?.removeRemoteProfile !== false && cfg.opsMasterPassword) {
+    remote = await deleteRemoteHostProfile(current, cfg);
+  }
+  const nextSites = removeSite(userData, domain);
+  return {
+    ok: true,
+    sites: nextSites,
+    remoteRemoved: remote.ok,
+    remoteDetail: remote,
+  };
 });
 
 ipcMain.handle("brand:parse-vendor-groups-text", async (_e, text) => parseVendorGroupsText(String(text || "")));

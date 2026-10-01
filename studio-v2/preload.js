@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("brandStudio", {
   preview: (payload) => ipcRenderer.invoke("brand:preview", payload),
   publishBatch: (payload) => ipcRenderer.invoke("brand:publish-batch", payload),
   clearSites: () => ipcRenderer.invoke("brand:clear-sites"),
+  deleteSite: (payload) => ipcRenderer.invoke("brand:delete-site", payload),
   applyVendorGroups: (payload) => ipcRenderer.invoke("brand:apply-vendor-groups", payload),
   parseVendorGroupsText: (text) => ipcRenderer.invoke("brand:parse-vendor-groups-text", text),
   updateSite: (payload) => ipcRenderer.invoke("brand:update-site", payload),

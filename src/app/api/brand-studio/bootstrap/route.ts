@@ -32,6 +32,12 @@ export async function POST(request: Request) {
     typeof body.host === "string" ? body.host : typeof body.domain === "string" ? body.domain : ""
   );
   const multiHost = Boolean(hostKey);
+  if (body.mainLanding !== undefined && !hostKey) {
+    return NextResponse.json(
+      { error: "host required — use keyword subdomain (e.g. keyword.apex.co.kr), not apex/www only" },
+      { status: 400 }
+    );
+  }
   const wantEnrich = body.enrich === true && body.mainLanding !== undefined;
   const useGemini = body.enrich === true;
   const geminiFromStudio =

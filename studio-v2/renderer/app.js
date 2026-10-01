@@ -271,6 +271,37 @@ function renderSites() {
     editBtn.textContent = "수정";
     editBtn.onclick = () => openSiteEdit(site);
     actions.appendChild(editBtn);
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn";
+    delBtn.type = "button";
+    delBtn.textContent = "삭제";
+    delBtn.onclick = async () => {
+      const dom = site.domain || site.id || "";
+      if (
+        !confirm(
+          `${site.keyword || site.siteName} (${dom})\n\n· 발행 대장에서 제거\n· 서버 host 프로필 삭제 (메인 설정 초기화)\n\nVercel 도메인 연결은 유지됩니다. 같은 키워드로 다시 발행하면 됩니다.\n\n진행할까요?`
+        )
+      ) {
+        return;
+      }
+      try {
+        const res = await window.brandStudio.deleteSite({ domain: dom, removeRemoteProfile: true });
+        state.sites = res.sites || [];
+        if (state.editingDomain === dom) {
+          $("site-edit").hidden = true;
+          state.editingDomain = "";
+        }
+        renderSites();
+        setStatus(
+          res.remoteRemoved
+            ? "대장·서버 프로필을 삭제했습니다. 같은 키워드로 재발행하세요."
+            : "대장에서 삭제했습니다. (서버 프로필 삭제는 실패 — 재발행으로 덮어쓸 수 있음)"
+        );
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    };
+    actions.appendChild(delBtn);
     if (site.siteUrl) {
       const openBtn = document.createElement("button");
       openBtn.className = "btn";
