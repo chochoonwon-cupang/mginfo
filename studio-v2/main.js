@@ -710,6 +710,87 @@ ipcMain.handle("brand:apply-apex-contact", async (_e, payload) => {
   };
 });
 
+ipcMain.handle("brand:clipboard-write", async (_e, text) => {
+  const { clipboard } = require("electron");
+  clipboard.writeText(String(text || ""));
+  return { ok: true };
+});
+
+ipcMain.handle("brand:bulk-apply-naver-meta", async (_e, payload) => {
+  const cfg = ensureConfigHydrated();
+  if (!String(cfg.opsMasterPassword || "").trim()) {
+    throw new Error("마스터 비밀번호를 저장하세요.");
+  }
+  const userData = app.getPath("userData");
+  const sites = readSites(userData);
+  const rawEntries = Array.isArray(payload?.entries) ? payload.entries : [];
+  if (!rawEntries.length) throw new Error("반영할 메타가 없습니다.");
+
+  const { sortStudioApiBases, studioAuthHeaders, mergeHeaders } = require("./lib/http-client");
+  const hub = String(cfg.opsHubUrl || "").replace(/\/$/, "");
+  const auth = studioAuthHeaders({
+    masterPassword: cfg.opsMasterPassword,
+    bypassSecret: cfg.deploymentProtectionBypass,
+  });
+
+  const byBase = new Map();
+  for (const row of rawEntries) {
+    const domain = String(row.domain || row.host || "")
+      .trim()
+      .toLowerCase();
+    const meta = String(row.naverSiteVerification || row.meta || "").trim();
+    if (!domain || !meta) continue;
+    const site = sites.find((s) => String(s.domain || s.id || "").toLowerCase() === domain);
+    const bases = sortStudioApiBases([site?.vercelHost, site?.siteUrl, hub].filter(Boolean));
+    const base = bases[0];
+    if (!base) {
+      throw new Error(`${domain}: Vercel URL이 없습니다. 발행 대장에 siteUrl/vercelHost가 필요합니다.`);
+    }
+    if (!byBase.has(base)) byBase.set(base, []);
+    byBase.get(base).push({
+      host: site?.domain || domain,
+      naverSiteVerification: meta,
+      domain,
+    });
+  }
+  if (!byBase.size) throw new Error("유효한 메타 입력이 없습니다.");
+
+  let totalUpdated = 0;
+  let totalSkipped = 0;
+  const notFound = [];
+  for (const [base, entries] of byBase.entries()) {
+    const res = await fetch(`${String(base).replace(/\/$/, "")}/api/brand-studio/host-profiles/bulk-naver`, {
+      method: "POST",
+      headers: mergeHeaders({ "Content-Type": "application/json" }, auth),
+      body: JSON.stringify({ entries: entries.map((e) => ({ host: e.host, naverSiteVerification: e.naverSiteVerification })) }),
+      signal: AbortSignal.timeout(120000),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status} @ ${base}`);
+    totalUpdated += data.updated || 0;
+    totalSkipped += data.skipped || 0;
+    if (Array.isArray(data.notFound)) notFound.push(...data.notFound);
+  }
+
+  let nextSites = sites;
+  for (const row of rawEntries) {
+    const domain = String(row.domain || "").trim().toLowerCase();
+    const meta = String(row.naverSiteVerification || "").trim();
+    if (!domain || !meta) continue;
+    const current = nextSites.find((s) => String(s.domain || s.id || "").toLowerCase() === domain);
+    if (!current) continue;
+    nextSites = upsertSite(userData, { ...current, naverSiteVerification: meta });
+  }
+
+  return {
+    ok: true,
+    updated: totalUpdated,
+    skipped: totalSkipped,
+    notFound,
+    sites: nextSites,
+  };
+});
+
 ipcMain.handle("brand:update-site", async (_e, payload) => {
   const cfg = ensureConfigHydrated();
   const domain = String(payload?.domain || payload?.id || "")

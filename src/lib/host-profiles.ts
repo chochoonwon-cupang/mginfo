@@ -66,7 +66,7 @@ export function isKeywordSubdomainHost(host: string): boolean {
   return h.endsWith(`.${apex}`);
 }
 
-function profileHostAliases(host: string): string[] {
+export function hostProfileAliasKeys(host: string): string[] {
   const key = normalizeHostKey(host);
   if (!key) return [];
   const out = new Set<string>([key]);
@@ -102,7 +102,7 @@ export function resolveHostProfile(
   host: string
 ): HostSiteProfile | null {
   if (!store.hostProfiles) return null;
-  for (const key of profileHostAliases(host)) {
+  for (const key of hostProfileAliasKeys(host)) {
     const hit = store.hostProfiles[key];
     if (hit) return hit;
   }

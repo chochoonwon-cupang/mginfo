@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld("brandStudio", {
   deleteSite: (payload) => ipcRenderer.invoke("brand:delete-site", payload),
   applyVendorGroups: (payload) => ipcRenderer.invoke("brand:apply-vendor-groups", payload),
   applyApexContact: (payload) => ipcRenderer.invoke("brand:apply-apex-contact", payload),
+  applyBulkNaverMeta: (payload) => ipcRenderer.invoke("brand:bulk-apply-naver-meta", payload),
+  copyText: (text) => ipcRenderer.invoke("brand:clipboard-write", text),
   parseVendorGroupsText: (text) => ipcRenderer.invoke("brand:parse-vendor-groups-text", text),
   updateSite: (payload) => ipcRenderer.invoke("brand:update-site", payload),
   open: (url) => ipcRenderer.invoke("brand:open", url),

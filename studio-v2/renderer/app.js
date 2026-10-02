@@ -505,14 +505,189 @@ function appendLog(line) {
   el.scrollTop = el.scrollHeight;
 }
 
-document.querySelectorAll(".nav-btn").forEach((btn) => {
+document.querySelectorAll(".nav-btn[data-view]").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".nav-btn").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".nav-btn[data-view]").forEach((b) => b.classList.remove("active"));
     document.querySelectorAll(".view").forEach((v) => v.classList.remove("show"));
     btn.classList.add("active");
     $(`view-${btn.dataset.view}`).classList.add("show");
   });
 });
+
+function publicSiteUrl(site) {
+  const u = String(site?.siteUrl || "").trim();
+  if (u) return u.replace(/\/$/, "");
+  const d = String(site?.domain || "").trim();
+  return d ? `https://${d}` : "";
+}
+
+function closeMetaModal() {
+  const modal = $("meta-modal");
+  if (!modal) return;
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function renderMetaModalRows() {
+  const wrap = $("meta-rows");
+  const countEl = $("meta-modal-count");
+  const filter = $("meta-filter-apex");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const apexFilter = filter ? String(filter.value || "").trim() : "";
+  const rows = sitesSortedByApex().filter((s) => !apexFilter || siteApex(s) === apexFilter);
+  if (countEl) {
+    countEl.textContent = `${rows.length}개 사이트 · 입력한 항목만 서버 반영`;
+  }
+  if (!rows.length) {
+    wrap.innerHTML = "<p class=\"hint\">발행 대장에 사이트가 없거나 필터에 맞는 항목이 없습니다.</p>";
+    return;
+  }
+  for (const site of rows) {
+    const domain = site.domain || site.id || "";
+    const url = publicSiteUrl(site);
+    const row = document.createElement("div");
+    row.className = "meta-row";
+    row.dataset.domain = domain;
+
+    const head = document.createElement("div");
+    head.className = "meta-row-head";
+    head.innerHTML = `<strong>${site.keyword || site.siteName || domain}</strong><small>${domain}</small>`;
+    const actions = document.createElement("div");
+    actions.className = "meta-row-actions";
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "btn sm";
+    copyBtn.textContent = "링크 복사";
+    copyBtn.onclick = async () => {
+      if (!url) return;
+      await window.brandStudio.copyText(url);
+      copyBtn.textContent = "복사됨";
+      setTimeout(() => {
+        copyBtn.textContent = "링크 복사";
+      }, 1200);
+    };
+    actions.appendChild(copyBtn);
+    if (site.adminUrl) {
+      const copyAdmin = document.createElement("button");
+      copyAdmin.type = "button";
+      copyAdmin.className = "btn sm";
+      copyAdmin.textContent = "관리자 URL";
+      copyAdmin.onclick = async () => {
+        await window.brandStudio.copyText(site.adminUrl);
+        copyAdmin.textContent = "복사됨";
+        setTimeout(() => {
+          copyAdmin.textContent = "관리자 URL";
+        }, 1200);
+      };
+      actions.appendChild(copyAdmin);
+    }
+    head.appendChild(actions);
+
+    const field = document.createElement("div");
+    const ta = document.createElement("textarea");
+    ta.rows = 2;
+    ta.placeholder = "naver-site-verification content 또는 meta 태그";
+    ta.value = site.naverSiteVerification || "";
+    ta.dataset.domain = domain;
+    field.appendChild(ta);
+
+    row.appendChild(head);
+    row.appendChild(field);
+    wrap.appendChild(row);
+  }
+}
+
+function openMetaModal() {
+  const modal = $("meta-modal");
+  if (!modal) return;
+  const filter = $("meta-filter-apex");
+  if (filter) {
+    const apexes = [...new Set(state.sites.map((s) => siteApex(s)).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, "ko")
+    );
+    const prev = filter.value;
+    filter.innerHTML = "<option value=\"\">전체</option>";
+    for (const apex of apexes) {
+      const opt = document.createElement("option");
+      opt.value = apex;
+      opt.textContent = apex;
+      filter.appendChild(opt);
+    }
+    filter.value = prev && apexes.includes(prev) ? prev : "";
+  }
+  if ($("meta-modal-status")) $("meta-modal-status").textContent = "";
+  renderMetaModalRows();
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function collectMetaModalEntries() {
+  const entries = [];
+  document.querySelectorAll("#meta-rows textarea[data-domain]").forEach((ta) => {
+    const domain = ta.dataset.domain || "";
+    const naverSiteVerification = ta.value.trim();
+    if (!domain || !naverSiteVerification) return;
+    entries.push({ domain, naverSiteVerification });
+  });
+  return entries;
+}
+
+const btnOpenMeta = $("btn-open-meta-modal");
+if (btnOpenMeta) btnOpenMeta.onclick = () => openMetaModal();
+const metaClose = $("meta-modal-close");
+const metaClose2 = $("meta-modal-close2");
+const metaBackdrop = $("meta-modal-backdrop");
+if (metaClose) metaClose.onclick = () => closeMetaModal();
+if (metaClose2) metaClose2.onclick = () => closeMetaModal();
+if (metaBackdrop) metaBackdrop.onclick = () => closeMetaModal();
+const metaFilter = $("meta-filter-apex");
+if (metaFilter) metaFilter.onchange = () => renderMetaModalRows();
+const metaApply = $("meta-modal-apply");
+if (metaApply) {
+  metaApply.onclick = async () => {
+    const entries = collectMetaModalEntries();
+    const status = $("meta-modal-status");
+    if (!entries.length) {
+      if (status) {
+        status.textContent = "메타를 입력한 사이트가 없습니다.";
+        status.style.color = "#f0a0a0";
+      }
+      return;
+    }
+    if (
+      !confirm(
+        `${entries.length}개 키워드의 네이버 메타를 서버(Blob)에 한 번에 반영합니다.\n\n· Vercel 재배포 없음\n· host-profile 없는 키워드는 건너뜀\n\n진행할까요?`
+      )
+    ) {
+      return;
+    }
+    metaApply.disabled = true;
+    if (status) {
+      status.textContent = "반영 중…";
+      status.style.color = "";
+    }
+    try {
+      const res = await window.brandStudio.applyBulkNaverMeta({ entries });
+      state.sites = res.sites || state.sites;
+      renderSites();
+      const nf = (res.notFound || []).length;
+      const msg = `완료: ${res.updated || 0}개 적용 · 건너뜀 ${res.skipped || 0}${nf ? ` · 프로필 없음 ${nf}` : ""}`;
+      if (status) {
+        status.textContent = msg;
+        status.style.color = "";
+      }
+      setStatus(msg);
+    } catch (err) {
+      if (status) {
+        status.textContent = err.message;
+        status.style.color = "#f0a0a0";
+      }
+    } finally {
+      metaApply.disabled = false;
+    }
+  };
+}
 
 $("btn-preview").onclick = async () => {
   try {

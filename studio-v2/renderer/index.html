@@ -25,6 +25,7 @@
         <nav>
           <button class="nav-btn active" data-view="compose" type="button">구성·발행</button>
           <button class="nav-btn" data-view="sites" type="button">발행 대장</button>
+          <button class="nav-btn" type="button" id="btn-open-meta-modal">메타태그 설정</button>
           <button class="nav-btn" data-view="settings" type="button">계정 설정</button>
         </nav>
         <div class="rail-foot">
@@ -295,6 +296,42 @@
         </section>
       </main>
     </div>
+
+    <div id="meta-modal" class="modal" hidden aria-hidden="true">
+      <div class="modal-backdrop" id="meta-modal-backdrop"></div>
+      <div class="modal-panel" role="dialog" aria-labelledby="meta-modal-title">
+        <header class="modal-head">
+          <div>
+            <p class="modal-kicker">Naver Search Advisor</p>
+            <h2 id="meta-modal-title">네이버 메타태그 일괄 설정</h2>
+          </div>
+          <button type="button" class="btn sm" id="meta-modal-close">닫기</button>
+        </header>
+        <p class="hint">
+          발행 대장 사이트별로 메타를 입력한 뒤 한 번에 서버(Blob)에 반영합니다. <b>Vercel 재배포 없음</b> ·
+          host-profile이 있는 키워드만 적용됩니다. content 값 또는 <code>&lt;meta …&gt;</code> 전체를 넣을 수
+          있습니다.
+        </p>
+        <div class="meta-modal-toolbar">
+          <label class="meta-filter-label">
+            메인 도메인
+            <select id="meta-filter-apex">
+              <option value="">전체</option>
+            </select>
+          </label>
+          <span id="meta-modal-count" class="hint"></span>
+        </div>
+        <div id="meta-rows" class="meta-rows"></div>
+        <footer class="modal-foot">
+          <p id="meta-modal-status" class="status"></p>
+          <div class="actions">
+            <button type="button" class="btn" id="meta-modal-close2">취소</button>
+            <button type="button" class="btn primary" id="meta-modal-apply">한 번에 서버에 반영</button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
     <script src="./app.js"></script>
   </body>
 </html>
